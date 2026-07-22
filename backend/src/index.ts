@@ -25,7 +25,6 @@ if (frontendDistExists) {
   await app.register(fastifyStatic, {
     root: frontendDist,
     prefix: '/',
-    decorateReply: false,
   });
 } else {
   app.log.warn('Frontend dist not found; static file serving disabled');

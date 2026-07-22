@@ -20,7 +20,6 @@ if (frontendDistExists) {
     await app.register(fastifyStatic, {
         root: frontendDist,
         prefix: '/',
-        decorateReply: false,
     });
 }
 else {
