@@ -2,6 +2,8 @@
 
 This guide covers deploying IArdoise to production on various platforms: Docker (recommended), Node.js, Railway, Render, or Vercel.
 
+> **📝 Latest Update (2026-07-22)**: Railway configuration simplified. Root-level `package.json` and `start.sh` enable automatic detection and deployment without Procfile or custom build scripts. See [Option 2: Railway.app](#-option-2-railwayapp).
+
 ---
 
 ## 📋 Pre-Deployment Checklist
@@ -104,7 +106,7 @@ docker push your-username/iardoise:latest
 
 ## 🚀 Option 2: Railway.app
 
-Railway is a Git-connected platform for Node.js deployments.
+Railway is a Git-connected platform for Node.js deployments. The repo is pre-configured with `start.sh` and root-level `package.json` for automatic detection.
 
 ### 1. Connect Repository
 
@@ -122,17 +124,24 @@ In Railway dashboard:
    HOST_USERNAME=admin
    HOST_PASSWORD_HASH=<bcryptjs hash>
    JWT_SECRET=<32+ random chars>
-   PORT=3000
    NODE_ENV=production
    ```
+   ⚠️ Do **not** set `PORT` — Railway assigns it automatically
 
-### 3. Add Procfile
+### 3. Deployment Structure
 
-Create `Procfile` at project root:
+The repo includes:
+- **`package.json`** (root) — Declares Node.js runtime and install script
+- **`start.sh`** (root) — Entry point that builds and starts the app from `IArdoise/`
 
+```bash
+# start.sh flow:
+# 1. cd IArdoise
+# 2. npm run build (frontend + backend)
+# 3. npm start (backend only, serves compiled frontend)
 ```
-web: cd IArdoise && npm install && npm run build && npm start
-```
+
+Railway auto-detects this structure and runs `npm start` on deployment.
 
 ### 4. Deploy
 
@@ -141,7 +150,15 @@ Push to GitHub:
 git push origin master
 ```
 
-Railway auto-detects and deploys. View logs in Railway dashboard.
+Railway auto-detects Node.js runtime (via root `package.json`), installs dependencies, and executes `start.sh`. View logs in Railway dashboard.
+
+### Troubleshooting Railway
+
+| Issue | Solution |
+|-------|----------|
+| Build fails: "Cannot find module" | Delete `node_modules` and `package-lock.json`, then push again. Railway reinstalls on redeploy. |
+| "Script start.sh not found" | Ensure `start.sh` is at repo root and committed (`git add start.sh`). |
+| Port binding error | Port is auto-assigned by Railway. Remove any hardcoded `PORT=3000` from env vars. |
 
 ---
 
