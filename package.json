@@ -1,0 +1,12 @@
+{
+  "name": "pwa-drawing-game-root",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "bash start.sh",
+    "postinstall": "cd IArdoise && npm install"
+  }
+}
