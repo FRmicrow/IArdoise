@@ -94,7 +94,7 @@ app.get('/health', async () => ({ status: 'ok' }));
 // SPA fallback — serve index.html for all non-API, non-WS routes
 if (frontendDistExists) {
   app.setNotFoundHandler(async (_req, reply) => {
-    return reply.sendFile('index.html');
+    return reply.type('text/html').sendFile('index.html');
   });
 }
 
