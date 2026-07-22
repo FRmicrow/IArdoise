@@ -1,8 +1,10 @@
 {
-  "ai": "bob",
-  "feature_numbering": "sequential",
-  "here": false,
-  "integration": "bob",
+  "ai": "claude",
+  "ai_skills": true,
+  "branch_numbering": "sequential",
+  "context_file": "CLAUDE.md",
+  "here": true,
+  "integration": "claude",
   "script": "sh",
-  "speckit_version": "0.12.9.dev0"
+  "speckit_version": "0.8.17"
 }
