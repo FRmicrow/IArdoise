@@ -1,4 +1,3 @@
-import 'dotenv/config';
 export interface Config {
     username: string;
     passwordHash: string;
