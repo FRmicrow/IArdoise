@@ -52,6 +52,10 @@ export function renderJoin(app: HTMLElement): void {
     sessionStorage.setItem('playerId', body.playerId);
     sessionStorage.setItem('playerName', body.name ?? '');
     sessionStorage.setItem('playerSessionId', sessionId);
-    window.location.hash = '#/player/game';
+
+    // Redirect to game after a small delay to ensure sessionStorage is ready
+    setTimeout(() => {
+      window.location.hash = '#/player/game';
+    }, 50);
   });
 }
