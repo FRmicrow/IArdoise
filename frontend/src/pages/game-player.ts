@@ -1,4 +1,5 @@
 import { DrawingCanvas } from '../canvas/DrawingCanvas';
+import { mountDrawingToolbar } from '../canvas/toolbar';
 import { WebSocketClient } from '../ws/WebSocketClient';
 
 export function renderGamePlayer(app: HTMLElement): void {
@@ -37,6 +38,7 @@ export function renderGamePlayer(app: HTMLElement): void {
     const canvasEl = document.createElement('canvas');
     canvasContainer.appendChild(canvasEl);
     drawingCanvas = new DrawingCanvas(canvasEl, canvasContainer);
+    mountDrawingToolbar(canvasContainer, drawingCanvas);
   };
 
   const goToHash = (hash: string): void => {

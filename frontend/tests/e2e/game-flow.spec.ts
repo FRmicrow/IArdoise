@@ -30,7 +30,7 @@
  *      join attempt afterwards shows the "ended" message (US5)
  */
 
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Page, type BrowserContext } from '@playwright/test';
 
 const BASE_URL = process.env['BASE_URL'] ?? 'http://localhost:3000';
 
@@ -70,6 +70,43 @@ async function hasNonBackgroundPixel(page: Page, canvasSelector: string): Promis
     }
     return false;
   });
+}
+
+// Drives a minimal host+player flow up to the player's active drawing
+// screen, for the drawing-tool scenarios below (US1/US2/US3/US4). Each of
+// these tests owns its own session — SessionManager frees the 'admin' host
+// slot once a session's status is 'ended', so sequential tests (workers: 1)
+// can each create a fresh one as long as the previous test called
+// endSession() first.
+async function createAndJoinActiveSession(
+  page: Page,
+  context: BrowserContext,
+  phrase: string,
+  playerName: string,
+): Promise<Page> {
+  await loginAsHost(page);
+  await page.fill('#initial-phrase-input', phrase);
+  await page.click('#new-game');
+  await page.waitForSelector('#qr-code[src]', { timeout: 5000 });
+  const joinUrl = (await page.textContent('#join-url'))!.trim();
+
+  const player = await context.newPage();
+  await player.goto(joinUrl);
+  await player.fill('#name', playerName);
+  await player.click('#join-form button[type="submit"]');
+  await player.waitForURL(`${BASE_URL}/#/player/game`, { timeout: 5000 });
+
+  await page.click('#start-game');
+  await page.waitForURL(`${BASE_URL}/#/host/game`, { timeout: 5000 });
+  await expect(player.locator('#phrase')).toHaveText(phrase, { timeout: 3000 });
+
+  return player;
+}
+
+async function endSession(page: Page): Promise<void> {
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.click('#end-game');
+  await page.waitForURL(`${BASE_URL}/#/closing`, { timeout: 5000 });
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -249,7 +286,10 @@ test.describe('Full game flow', () => {
 
     // US3 — the phrase label is visible and the drawing area fills the screen
     await expect(alice.locator('#phrase')).toHaveText('Dessine un chat', { timeout: 3000 });
-    const canvas = alice.locator('#canvas-container canvas');
+    // Fabric.js renders two stacked <canvas> elements (lower-canvas for
+    // committed strokes, upper-canvas for live pointer interaction) inside
+    // #canvas-container, so a bare "canvas" selector is now ambiguous.
+    const canvas = alice.locator('#canvas-container canvas.upper-canvas');
     await expect(canvas).toBeVisible();
     const box = await canvas.boundingBox();
     expect(box).not.toBeNull();
@@ -259,7 +299,9 @@ test.describe('Full game flow', () => {
     await alice.mouse.down();
     await alice.mouse.move(box!.x + 80, box!.y + 80, { steps: 5 });
     await alice.mouse.up();
-    await expect.poll(() => hasNonBackgroundPixel(alice, '#canvas-container canvas'), { timeout: 3000 }).toBe(true);
+    await expect
+      .poll(() => hasNonBackgroundPixel(alice, '#canvas-container canvas.lower-canvas'), { timeout: 3000 })
+      .toBe(true);
 
     // US4 — admin publishes a new phrase via the explicit "Valider" action;
     // it appears on every connected player's screen without any player action
@@ -307,5 +349,264 @@ test.describe('Full game flow', () => {
     await lateJoinerContext.close();
     await zoeContext.close();
     await yasmineContext.close();
+  });
+});
+
+test.describe('Mobile drawing screen — fullscreen and toolbar (003-mobile-canvas-tools)', () => {
+  test('US1 — canvas fills the viewport and survives rotation', async ({ page, context }, testInfo) => {
+    // Fixed-viewport WebKit device emulation can't simulate a real mobile
+    // browser's address-bar show/hide, so this scenario is only meaningful
+    // on the Mobile Safari project (see plan.md's Testing-scope note).
+    test.skip(testInfo.project.name !== 'Mobile Safari', 'Fullscreen/orientation behavior is specific to the Mobile Safari project');
+    test.setTimeout(30000);
+
+    const player = await createAndJoinActiveSession(page, context, 'Dessine une maison', 'Rex');
+
+    const assertCanvasFillsViewport = async (): Promise<void> => {
+      const viewport = player.viewportSize();
+      expect(viewport).not.toBeNull();
+
+      const [spaceMd, spaceSm] = await player.evaluate(() => {
+        const styles = getComputedStyle(document.documentElement);
+        return [
+          parseFloat(styles.getPropertyValue('--space-md')),
+          parseFloat(styles.getPropertyValue('--space-sm')),
+        ];
+      });
+      // .page--full's only "chrome" not covered by the phrase/canvas boxes
+      // themselves is 2×space-md vertical padding plus 2 row gaps of
+      // space-sm (three grid rows: waiting/phrase/canvas — waiting collapses
+      // to 0 height once hidden, per style.css's explicit grid-row rules).
+      const chrome = spaceMd * 2 + spaceSm * 2;
+
+      const phraseBox = await player.locator('#phrase').boundingBox();
+      const canvasBox = await player.locator('#canvas-container').boundingBox();
+      expect(phraseBox).not.toBeNull();
+      expect(canvasBox).not.toBeNull();
+
+      const contentHeight = phraseBox!.height + canvasBox!.height;
+      expect(Math.abs(contentHeight + chrome - viewport!.height)).toBeLessThanOrEqual(3);
+    };
+
+    await assertCanvasFillsViewport();
+
+    // Draw a small stroke close to the canvas's own top-left corner so it's
+    // guaranteed to remain within bounds after rotation regardless of the
+    // new, possibly smaller, dimension (per spec.md's Assumptions: a stroke
+    // near an edge may legitimately fall outside a smaller canvas, but this
+    // one never gets close to any edge in either orientation).
+    const lowerCanvas = player.locator('#canvas-container canvas.lower-canvas');
+    const hasInkNearOrigin = async (): Promise<boolean> =>
+      lowerCanvas.evaluate((el) => {
+        const canvas = el as HTMLCanvasElement;
+        const context = canvas.getContext('2d');
+        if (!context) return false;
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        const { data } = context.getImageData(0, 0, Math.round(45 * scaleX), Math.round(45 * scaleY));
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i] > 10 || data[i + 1] > 10 || data[i + 2] > 10) return true;
+        }
+        return false;
+      });
+
+    const canvasBox = (await lowerCanvas.boundingBox())!;
+    await player.mouse.move(canvasBox.x + 15, canvasBox.y + 15);
+    await player.mouse.down();
+    await player.mouse.move(canvasBox.x + 35, canvasBox.y + 35, { steps: 3 });
+    await player.mouse.up();
+    await expect.poll(hasInkNearOrigin, { timeout: 3000 }).toBe(true);
+
+    // Simulate device rotation.
+    const before = player.viewportSize()!;
+    await player.setViewportSize({ width: before.height, height: before.width });
+
+    await assertCanvasFillsViewport();
+    expect(await hasInkNearOrigin()).toBe(true);
+
+    await endSession(page);
+  });
+
+  test('US2 — eraser removes only the touched marks', async ({ page, context }) => {
+    test.setTimeout(30000);
+
+    const player = await createAndJoinActiveSession(page, context, 'Efface un carre', 'Uma');
+
+    const lowerCanvas = player.locator('#canvas-container canvas.lower-canvas');
+    const canvasBox = (await lowerCanvas.boundingBox())!;
+
+    const drag = async (fromX: number, fromY: number, toX: number, toY: number): Promise<void> => {
+      await player.mouse.move(canvasBox.x + fromX, canvasBox.y + fromY);
+      await player.mouse.down();
+      await player.mouse.move(canvasBox.x + toX, canvasBox.y + toY, { steps: 5 });
+      await player.mouse.up();
+    };
+
+    const hasInkAt = async (cssX: number, cssY: number): Promise<boolean> =>
+      lowerCanvas.evaluate(
+        (el, [x, y]) => {
+          const canvas = el as HTMLCanvasElement;
+          const context = canvas.getContext('2d');
+          if (!context) return false;
+          const rect = canvas.getBoundingClientRect();
+          const scaleX = canvas.width / rect.width;
+          const scaleY = canvas.height / rect.height;
+          const size = Math.max(Math.round(8 * scaleX), 6);
+          const data = context.getImageData(
+            Math.max(Math.round(x * scaleX) - size / 2, 0),
+            Math.max(Math.round(y * scaleY) - size / 2, 0),
+            size,
+            size,
+          ).data;
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i] > 10 || data[i + 1] > 10 || data[i + 2] > 10) return true;
+          }
+          return false;
+        },
+        [cssX, cssY],
+      );
+
+    // Stroke A and stroke B: two horizontal segments far enough apart that
+    // erasing one cannot accidentally touch the other.
+    await drag(40, 40, 90, 40);
+    await drag(40, 150, 90, 150);
+    await expect.poll(() => hasInkAt(65, 40), { timeout: 3000 }).toBe(true);
+    await expect.poll(() => hasInkAt(65, 150), { timeout: 3000 }).toBe(true);
+
+    // Switch to the eraser and drag back over stroke A only.
+    const eraserButton = player.locator('.drawing-toolbar__eraser');
+    await eraserButton.click();
+    await expect(eraserButton).toHaveAttribute('aria-pressed', 'true');
+    await drag(40, 40, 90, 40);
+
+    // Stroke A is gone; stroke B, never touched by the eraser, is unaffected.
+    await expect.poll(() => hasInkAt(65, 40), { timeout: 3000 }).toBe(false);
+    expect(await hasInkAt(65, 150)).toBe(true);
+
+    // Switching back to draw mode resumes normal drawing.
+    await eraserButton.click();
+    await expect(eraserButton).toHaveAttribute('aria-pressed', 'false');
+    await drag(40, 250, 90, 250);
+    await expect.poll(() => hasInkAt(65, 250), { timeout: 3000 }).toBe(true);
+
+    await endSession(page);
+  });
+
+  test('US3 — color control only affects strokes drawn after the change', async ({ page, context }) => {
+    test.setTimeout(30000);
+
+    const player = await createAndJoinActiveSession(page, context, 'Colore un ballon', 'Vic');
+
+    const lowerCanvas = player.locator('#canvas-container canvas.lower-canvas');
+    const canvasBox = (await lowerCanvas.boundingBox())!;
+
+    const drag = async (fromX: number, fromY: number, toX: number, toY: number): Promise<void> => {
+      await player.mouse.move(canvasBox.x + fromX, canvasBox.y + fromY);
+      await player.mouse.down();
+      await player.mouse.move(canvasBox.x + toX, canvasBox.y + toY, { steps: 5 });
+      await player.mouse.up();
+    };
+
+    const pixelColorAt = async (cssX: number, cssY: number): Promise<[number, number, number]> =>
+      lowerCanvas.evaluate(
+        (el, [x, y]) => {
+          const canvas = el as HTMLCanvasElement;
+          const context = canvas.getContext('2d')!;
+          const rect = canvas.getBoundingClientRect();
+          const scaleX = canvas.width / rect.width;
+          const scaleY = canvas.height / rect.height;
+          const data = context.getImageData(Math.round(x * scaleX), Math.round(y * scaleY), 1, 1).data;
+          return [data[0], data[1], data[2]] as [number, number, number];
+        },
+        [cssX, cssY],
+      );
+
+    // First stroke, drawn with the default color.
+    await drag(40, 40, 90, 40);
+    await expect.poll(async () => (await pixelColorAt(65, 40))[0], { timeout: 3000 }).toBeGreaterThan(200);
+    const defaultStrokeColor = await pixelColorAt(65, 40);
+
+    // Change color, then draw a second, spatially separate stroke.
+    await player.locator('.drawing-toolbar__color').evaluate((el, value) => {
+      const input = el as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }, '#ff0000');
+    await drag(40, 150, 90, 150);
+
+    await expect.poll(async () => (await pixelColorAt(65, 150))[0], { timeout: 3000 }).toBeGreaterThan(200);
+    const newStrokeColor = await pixelColorAt(65, 150);
+    expect(newStrokeColor[0]).toBeGreaterThan(200);
+    expect(newStrokeColor[1]).toBeLessThan(50);
+    expect(newStrokeColor[2]).toBeLessThan(50);
+
+    // The earlier stroke must keep its original color.
+    expect(await pixelColorAt(65, 40)).toEqual(defaultStrokeColor);
+
+    await endSession(page);
+  });
+
+  test('US4 — stroke size control only affects strokes drawn after the change', async ({ page, context }) => {
+    test.setTimeout(30000);
+
+    const player = await createAndJoinActiveSession(page, context, 'Trace un trait epais', 'Theo');
+
+    const lowerCanvas = player.locator('#canvas-container canvas.lower-canvas');
+    const canvasBox = (await lowerCanvas.boundingBox())!;
+
+    const drag = async (fromX: number, fromY: number, toX: number, toY: number): Promise<void> => {
+      await player.mouse.move(canvasBox.x + fromX, canvasBox.y + fromY);
+      await player.mouse.down();
+      await player.mouse.move(canvasBox.x + toX, canvasBox.y + toY, { steps: 5 });
+      await player.mouse.up();
+    };
+
+    // Approximates rendered stroke thickness in px by counting non-background
+    // pixels along a short vertical scan line perpendicular to a horizontal
+    // stroke, centered on it.
+    const strokeThicknessAt = async (cssX: number, cssYCenter: number): Promise<number> =>
+      lowerCanvas.evaluate(
+        (el, [x, yCenter]) => {
+          const canvas = el as HTMLCanvasElement;
+          const context = canvas.getContext('2d')!;
+          const rect = canvas.getBoundingClientRect();
+          const scaleX = canvas.width / rect.width;
+          const scaleY = canvas.height / rect.height;
+          const scanHeightCss = 50;
+          const px = Math.round(x * scaleX);
+          const topY = Math.max(Math.round((yCenter - scanHeightCss / 2) * scaleY), 0);
+          const height = Math.round(scanHeightCss * scaleY);
+          const data = context.getImageData(px, topY, 1, height).data;
+          let count = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i] > 10 || data[i + 1] > 10 || data[i + 2] > 10) count++;
+          }
+          return count;
+        },
+        [cssX, cssYCenter],
+      );
+
+    // First stroke, drawn at the default width.
+    await drag(40, 60, 90, 60);
+    await expect.poll(() => strokeThicknessAt(65, 60), { timeout: 3000 }).toBeGreaterThan(0);
+    const defaultThickness = await strokeThicknessAt(65, 60);
+
+    // Widen the stroke size, then draw a second, spatially separate stroke.
+    await player.locator('.drawing-toolbar__width').evaluate((el, value) => {
+      const input = el as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }, '20');
+    await drag(40, 180, 90, 180);
+
+    await expect
+      .poll(() => strokeThicknessAt(65, 180), { timeout: 3000 })
+      .toBeGreaterThan(defaultThickness * 1.5);
+
+    // The earlier stroke must keep its original thickness.
+    expect(await strokeThicknessAt(65, 60)).toBe(defaultThickness);
+
+    await endSession(page);
   });
 });

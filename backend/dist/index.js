@@ -43,21 +43,42 @@ const { registerConnectionHandler } = await import('./ws/handlers/connectionHand
 const { registerPromptHandler } = await import('./ws/handlers/promptHandler.js');
 const { registerGameHandler } = await import('./ws/handlers/gameHandler.js');
 const { registerHostPlayerHandler } = await import('./ws/handlers/hostPlayerHandler.js');
+const { registerHeartbeatHandler } = await import('./ws/handlers/heartbeatHandler.js');
 registerAuthHandler(wsRouter);
 registerConnectionHandler(wsRouter);
 registerPromptHandler(wsRouter);
 registerGameHandler(wsRouter);
 registerHostPlayerHandler(wsRouter);
+registerHeartbeatHandler(wsRouter);
 // Connection → wsClientId map for host tracking
 const hostConnections = new Map(); // sessionId → wsClientId
 app.get('/ws', { websocket: true }, (socket, _req) => {
     const wsClientId = randomUUID();
     register(wsClientId, socket);
     app.log.info(`WS connected: ${wsClientId}`);
+    // Mobile/WiFi NATs silently drop idle WebSocket connections (typically
+    // after 30-60s of no traffic) without ever firing a close/error event on
+    // either end. A player sitting on the waiting screen looks connected but
+    // is unreachable, so a later broadcast (e.g. GAME_STARTED) never arrives.
+    // Pinging keeps the connection alive and reaps genuinely dead sockets so
+    // the client's own reconnect logic can kick in.
+    let isAlive = true;
+    socket.on('pong', () => {
+        isAlive = true;
+    });
+    const heartbeat = setInterval(() => {
+        if (!isAlive) {
+            socket.terminate();
+            return;
+        }
+        isAlive = false;
+        socket.ping();
+    }, 25000);
     socket.on('message', (raw) => {
         wsRouter.handle(socket, wsClientId, raw.toString());
     });
     socket.on('close', () => {
+        clearInterval(heartbeat);
         app.log.info(`WS disconnected: ${wsClientId}`);
         // Trigger connection handler for cleanup
         wsRouter.handle(socket, wsClientId, JSON.stringify({
@@ -67,6 +88,7 @@ app.get('/ws', { websocket: true }, (socket, _req) => {
         deregister(wsClientId);
     });
     socket.on('error', (err) => {
+        clearInterval(heartbeat);
         app.log.error(`WS error on ${wsClientId}: ${err.message}`);
         deregister(wsClientId);
     });

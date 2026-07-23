@@ -1,7 +1,14 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
+  test: {
+    // Vitest's default include glob also matches "*.spec.ts", which picks up
+    // the Playwright E2E file under tests/e2e/ and fails on its
+    // Playwright-only test.describe() API. Scope Vitest to this project's
+    // own "*.test.ts" convention instead.
+    include: ['tests/**/*.test.ts'],
+  },
   plugins: [
     VitePWA({
       registerType: 'autoUpdate',

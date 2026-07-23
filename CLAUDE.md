@@ -1,5 +1,5 @@
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan:
-specs/002-fix-game-start-reload/plan.md
+specs/003-mobile-canvas-tools/plan.md
 <!-- SPECKIT END -->
