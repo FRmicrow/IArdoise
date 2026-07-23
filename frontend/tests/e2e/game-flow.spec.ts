@@ -34,6 +34,19 @@ import { test, expect, type Page } from '@playwright/test';
 
 const BASE_URL = process.env['BASE_URL'] ?? 'http://localhost:3000';
 
+// Mirrors WebSocketClient.ts's HEARTBEAT_INTERVAL_MS/HEARTBEAT_REPLY_TIMEOUT_MS.
+const HEARTBEAT_INTERVAL_MS = 20000;
+const HEARTBEAT_REPLY_TIMEOUT_MS = 8000;
+
+// Restore a blackholed connection's connectivity partway through the reply
+// window: late enough that the first PING (sent HEARTBEAT_INTERVAL_MS after
+// connect()) has already been silently dropped — proving the outage genuinely
+// spans the detection window, not just a lucky coincidence — but before the
+// reply-timeout itself elapses. Otherwise the heartbeat's own close-and
+// -reconnect fires *into* a connection that's still blackholed (its fresh
+// AUTH gets dropped too), and recovery would need an entire extra cycle.
+const RESTORE_CONNECTIVITY_AT_MS = HEARTBEAT_INTERVAL_MS + HEARTBEAT_REPLY_TIMEOUT_MS / 2;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async function loginAsHost(page: Page): Promise<void> {
@@ -63,6 +76,11 @@ async function hasNonBackgroundPixel(page: Page, canvasSelector: string): Promis
 
 test.describe('Full game flow', () => {
   test('Golden path — create, join, roster, draw, publish, end', async ({ page, context }) => {
+    // This scenario deliberately waits out real client heartbeat
+    // detect-and-reconnect cycles (T005/T007) on top of the golden path
+    // itself, well past Playwright's default 30s per-test timeout.
+    test.setTimeout(120000);
+
     // US1 — admin creates a session with an initial phrase
     await loginAsHost(page);
     await page.fill('#initial-phrase-input', 'Dessine un chat');
@@ -126,19 +144,99 @@ test.describe('Full game flow', () => {
     await bobReturnVisit.close();
     await bobContext.close();
 
+    // T005 (US1 regression) — Zoe's WebSocket will be silently blackholed (no
+    // close/error event fires on either end) while her tab stays foregrounded
+    // the whole time, faithfully reproducing the reported bug. Route her
+    // socket before she navigates, so every message she sends/receives is
+    // gated on `zoeBlackhole` (starts false — she joins and reaches the
+    // waiting screen normally first). `zoeConnectionCount` increments each
+    // time a new native WebSocket is constructed for her, so we can later
+    // prove a *reconnect* happened rather than some other recovery path.
+    let zoeBlackhole = false;
+    let zoeConnectionCount = 0;
+    const zoeContext = await context.browser()!.newContext();
+    const zoe = await zoeContext.newPage();
+    await zoe.routeWebSocket('/ws', (ws) => {
+      zoeConnectionCount += 1;
+      const server = ws.connectToServer();
+      ws.onMessage((message) => {
+        if (!zoeBlackhole) server.send(message);
+      });
+      server.onMessage((message) => {
+        if (!zoeBlackhole) ws.send(message);
+      });
+    });
+    await zoe.goto(joinUrl);
+    await zoe.fill('#name', 'Zoe');
+    await zoe.click('#join-form button[type="submit"]');
+    await zoe.waitForURL(`${BASE_URL}/#/player/game`, { timeout: 5000 });
+    await expect(zoe.locator('#waiting')).toBeVisible();
+    const zoeConnectedAt = Date.now();
+    zoeBlackhole = true;
+
+    // T007 (US2 regression) — Yasmine is blackholed the same way as Zoe, but
+    // stays blackholed through both the game start *and* a later published
+    // phrase, so her eventual resync must reflect the session's real current
+    // state (the second phrase), not a stale replay of the original
+    // GAME_STARTED broadcast. `yasmineLastConnectedAt` is refreshed on every
+    // reconnect attempt (there may be several while she stays blackholed) so
+    // that whenever we finally restore her connectivity, we can wait exactly
+    // long enough relative to whichever connection is currently live.
+    let yasmineBlackhole = false;
+    let yasmineConnectionCount = 0;
+    let yasmineLastConnectedAt = 0;
+    const yasmineContext = await context.browser()!.newContext();
+    const yasmine = await yasmineContext.newPage();
+    await yasmine.routeWebSocket('/ws', (ws) => {
+      yasmineConnectionCount += 1;
+      yasmineLastConnectedAt = Date.now();
+      const server = ws.connectToServer();
+      ws.onMessage((message) => {
+        if (!yasmineBlackhole) server.send(message);
+      });
+      server.onMessage((message) => {
+        if (!yasmineBlackhole) ws.send(message);
+      });
+    });
+    await yasmine.goto(joinUrl);
+    await yasmine.fill('#name', 'Yasmine');
+    await yasmine.click('#join-form button[type="submit"]');
+    await yasmine.waitForURL(`${BASE_URL}/#/player/game`, { timeout: 5000 });
+    await expect(yasmine.locator('#waiting')).toBeVisible();
+    yasmineBlackhole = true;
+
     // US2 — the admin's roster reflects all joins live, with no dedup suffix
-    await expect(page.locator('#player-list .roster-item')).toHaveCount(3, { timeout: 3000 });
+    await expect(page.locator('#player-list .roster-item')).toHaveCount(5, { timeout: 3000 });
     const rosterNames = await page.locator('#player-list [data-role="name"]').allTextContents();
-    expect(rosterNames).toEqual(['Alice', 'Alice', 'Bob']);
+    expect(rosterNames).toEqual(['Alice', 'Alice', 'Bob', 'Zoe', 'Yasmine']);
 
     const startDisabled = await page.getAttribute('#start-game', 'disabled');
     expect(startDisabled).toBeNull();
 
-    // US2/US3 — starting the game moves every joined player off the waiting screen
+    // US2/US3 — starting the game moves every joined player off the waiting screen.
+    // FR-005/SC-004 — the admin must never be blocked by Zoe's still-blackholed
+    // connection, so this must resolve almost immediately, not just within the
+    // outer 5s Playwright timeout.
+    const startClickedAt = Date.now();
     await page.click('#start-game');
     await page.waitForURL(`${BASE_URL}/#/host/game`, { timeout: 5000 });
+    expect(Date.now() - startClickedAt).toBeLessThan(1000);
     await expect(alice.locator('#waiting')).toBeHidden({ timeout: 3000 });
     await expect(alice2.locator('#waiting')).toBeHidden({ timeout: 3000 });
+
+    // T005 (US1 regression) — Zoe is still blackholed. Wait until the client
+    // heartbeat's detect-and-reconnect cycle has had a chance to run at least
+    // once *while she's still unreachable* (otherwise her first PING would
+    // simply succeed once connectivity returns, and the heartbeat would never
+    // notice anything was ever wrong — proving nothing about the fix). Only
+    // then restore her connectivity and confirm she still reaches the game
+    // screen within the ~15s recovery bound (SC-003) via a genuine reconnect
+    // (a brand-new WebSocket), not some other path.
+    await page.waitForTimeout(Math.max(0, RESTORE_CONNECTIVITY_AT_MS - (Date.now() - zoeConnectedAt)));
+    zoeBlackhole = false;
+    await expect(zoe.locator('#waiting')).toBeHidden({ timeout: 15000 });
+    await expect(zoe.locator('#phrase')).toBeVisible();
+    expect(zoeConnectionCount).toBeGreaterThan(1);
 
     // Edge case — a late join once the game is active shows a distinct
     // message. Isolated context: a new device, not Alice's, must see the
@@ -170,6 +268,20 @@ test.describe('Full game flow', () => {
     await expect(alice.locator('#phrase')).toHaveText('Dessine un chien', { timeout: 3000 });
     await expect(alice2.locator('#phrase')).toHaveText('Dessine un chien', { timeout: 3000 });
 
+    // T007 (US2 regression) — Yasmine has been blackholed since before the
+    // game even started, missing both GAME_STARTED (first phrase) and
+    // PROMPT_UPDATED (second phrase) entirely. Restore her connectivity now
+    // (mid-reply-window relative to whichever reconnect attempt is currently
+    // live, same reasoning as Zoe's recovery above) and confirm her
+    // heartbeat-triggered reconnect resyncs via SESSION_STATE straight to the
+    // session's *real current* phrase — she must never show the first phrase
+    // at any point, only ever go straight to the second one.
+    await page.waitForTimeout(Math.max(0, RESTORE_CONNECTIVITY_AT_MS - (Date.now() - yasmineLastConnectedAt)));
+    yasmineBlackhole = false;
+    await expect(yasmine.locator('#phrase')).toHaveText('Dessine un chien', { timeout: 15000 });
+    await expect(yasmine.locator('#waiting')).toBeHidden();
+    expect(yasmineConnectionCount).toBeGreaterThan(1);
+
     // US4 — an empty submission is rejected and the previous phrase stays active
     await page.fill('#prompt-input', '   ');
     await page.click('#prompt-form button[type="submit"]');
@@ -193,5 +305,7 @@ test.describe('Full game flow', () => {
     await alice.close();
     await alice2Context.close();
     await lateJoinerContext.close();
+    await zoeContext.close();
+    await yasmineContext.close();
   });
 });

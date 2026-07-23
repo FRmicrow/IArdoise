@@ -52,12 +52,14 @@ const { registerConnectionHandler } = await import('./ws/handlers/connectionHand
 const { registerPromptHandler } = await import('./ws/handlers/promptHandler.js');
 const { registerGameHandler } = await import('./ws/handlers/gameHandler.js');
 const { registerHostPlayerHandler } = await import('./ws/handlers/hostPlayerHandler.js');
+const { registerHeartbeatHandler } = await import('./ws/handlers/heartbeatHandler.js');
 
 registerAuthHandler(wsRouter);
 registerConnectionHandler(wsRouter);
 registerPromptHandler(wsRouter);
 registerGameHandler(wsRouter);
 registerHostPlayerHandler(wsRouter);
+registerHeartbeatHandler(wsRouter);
 
 // Connection → wsClientId map for host tracking
 const hostConnections = new Map<string, string>(); // sessionId → wsClientId

@@ -52,6 +52,7 @@ async function buildTestApp(): Promise<FastifyInstance> {
   const { registerPromptHandler } = await import('../../src/ws/handlers/promptHandler.js');
   const { registerGameHandler } = await import('../../src/ws/handlers/gameHandler.js');
   const { registerHostPlayerHandler } = await import('../../src/ws/handlers/hostPlayerHandler.js');
+  const { registerHeartbeatHandler } = await import('../../src/ws/handlers/heartbeatHandler.js');
 
   await fastify.register(loginRoute, { prefix: '/api/auth' });
   await fastify.register(sessionRoutes, { prefix: '/api/sessions' });
@@ -63,6 +64,7 @@ async function buildTestApp(): Promise<FastifyInstance> {
   registerPromptHandler(wsRouter);
   registerGameHandler(wsRouter);
   registerHostPlayerHandler(wsRouter);
+  registerHeartbeatHandler(wsRouter);
 
   fastify.get('/ws', { websocket: true }, (socket) => {
     const wsClientId = randomUUID();
@@ -483,6 +485,19 @@ describe('HTTP API integration', () => {
 
       hostWs.close();
       playerWs.close();
+    });
+  });
+
+  // ── Heartbeat contract ───────────────────────────────────────────────────
+  describe('Heartbeat (PING/PONG)', () => {
+    it('replies PONG to PING, even before AUTH has been sent on that connection', async () => {
+      const socket = await connectWs(app);
+
+      send(socket, 'PING', {});
+      const pong = await waitFor(socket, 'PONG');
+      expect(pong.payload).toEqual({});
+
+      socket.close();
     });
   });
 });

@@ -22,6 +22,7 @@ type EventMap = {
   QUESTION_ADVANCED: { roundIndex: number };
   GAME_ENDED: Record<string, never>;
   HOST_DISCONNECTED: Record<string, never>;
+  PONG: Record<string, never>;
   ERROR: { code: string; message: string };
 };
 
@@ -57,14 +58,27 @@ class TypedEventEmitter {
   }
 }
 
+// A player sitting on the waiting screen can end up on a socket that reports
+// OPEN but is actually unreachable (NAT/mobile idle-drop, no close/error
+// event on either end). Browsers don't expose the native WS ping/pong
+// control frames to JS, so this application-level probe is the only way for
+// the client to independently detect that condition, regardless of tab
+// visibility.
+const HEARTBEAT_INTERVAL_MS = 20000;
+const HEARTBEAT_REPLY_TIMEOUT_MS = 8000;
+
 export class WebSocketClient {
   private socket: WebSocket | null = null;
   private reconnectAttempts = 0;
   private manuallyClosed = false;
   private visibilityListenerAdded = false;
+  private heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
+  private pongTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private readonly events = new TypedEventEmitter();
 
-  constructor(private readonly authPayload: AuthPayload) {}
+  constructor(private readonly authPayload: AuthPayload) {
+    this.on('PONG', () => this.clearPongTimeout());
+  }
 
   connect(): void {
     this.manuallyClosed = false;
@@ -75,6 +89,7 @@ export class WebSocketClient {
     socket.addEventListener('open', () => {
       this.reconnectAttempts = 0;
       this.send('AUTH', this.authPayload);
+      this.startHeartbeat();
     });
 
     socket.addEventListener('message', (event) => {
@@ -112,6 +127,7 @@ export class WebSocketClient {
 
   close(): void {
     this.manuallyClosed = true;
+    this.clearHeartbeat();
     this.socket?.close();
     this.socket = null;
   }
@@ -124,5 +140,34 @@ export class WebSocketClient {
     if (this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify({ type, payload }));
     }
+  }
+
+  private startHeartbeat(): void {
+    this.clearHeartbeat();
+    this.heartbeatIntervalId = window.setInterval(() => {
+      this.send('PING', {});
+      this.pongTimeoutId = window.setTimeout(() => {
+        // No PONG within the reply window — treat the connection as dead,
+        // exactly like the visibilitychange handler does for a socket found
+        // stale on foregrounding.
+        this.socket?.close();
+        this.connect();
+      }, HEARTBEAT_REPLY_TIMEOUT_MS);
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private clearPongTimeout(): void {
+    if (this.pongTimeoutId !== null) {
+      window.clearTimeout(this.pongTimeoutId);
+      this.pongTimeoutId = null;
+    }
+  }
+
+  private clearHeartbeat(): void {
+    if (this.heartbeatIntervalId !== null) {
+      window.clearInterval(this.heartbeatIntervalId);
+      this.heartbeatIntervalId = null;
+    }
+    this.clearPongTimeout();
   }
 }
