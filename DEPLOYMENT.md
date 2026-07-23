@@ -2,15 +2,15 @@
 
 This guide covers deploying IArdoise to production on various platforms: Docker (recommended), Node.js, Railway, Render, or Vercel.
 
-> **📝 Latest Update (2026-07-22)**: Railway configuration simplified. Root-level `package.json` and `start.sh` enable automatic detection and deployment without Procfile or custom build scripts. See [Option 2: Railway.app](#-option-2-railwayapp).
+> **📝 Latest Update (2026-07-24)**: `backend/dist` and `frontend/dist` are no longer committed to Git — they are build artifacts and must be regenerated on every deploy via `npm run build`. The old `start.sh` wrapper (used when the project lived at `IArdoise/IArdoise/`) was removed during the repo restructure; Railway now relies on the root `package.json`'s `build`/`start` scripts directly. See [Option 2: Railway.app](#-option-2-railwayapp).
 
 ---
 
 ## 📋 Pre-Deployment Checklist
 
 - [ ] Environment variables set (`.env` with all required values)
-- [ ] Backend built and tested (`npm run build && npm test`)
-- [ ] Frontend built and tested (`npm run build:frontend`)
+- [ ] Backend built and tested (`npm run build --workspace=backend && npm test`)
+- [ ] Frontend built and tested (`npm run build --workspace=frontend`)
 - [ ] All dependencies up-to-date (`npm audit`)
 - [ ] Node.js 20 LTS confirmed available on target platform
 - [ ] Domain/URL for production noted (for CORS, WebSocket, PWA manifest)
@@ -106,7 +106,7 @@ docker push your-username/iardoise:latest
 
 ## 🚀 Option 2: Railway.app
 
-Railway is a Git-connected platform for Node.js deployments. The repo is pre-configured with `start.sh` and root-level `package.json` for automatic detection.
+Railway is a Git-connected platform for Node.js deployments. It auto-detects Node.js via Nixpacks from the root `package.json` — no `start.sh` or Procfile needed.
 
 ### 1. Connect Repository
 
@@ -130,18 +130,16 @@ In Railway dashboard:
 
 ### 3. Deployment Structure
 
-The repo includes:
-- **`package.json`** (root) — Declares Node.js runtime and install script
-- **`start.sh`** (root) — Entry point that builds and starts the app from `IArdoise/`
+The root `package.json` declares npm workspaces (`backend`, `frontend`) and two scripts Railway relies on:
 
-```bash
-# start.sh flow:
-# 1. cd IArdoise
-# 2. npm run build (frontend + backend)
-# 3. npm start (backend only, serves compiled frontend)
+```json
+"build": "npm run build --workspace=frontend && npm run build --workspace=backend",
+"start": "npm run start --workspace=backend"
 ```
 
-Railway auto-detects this structure and runs `npm start` on deployment.
+`backend/dist/` and `frontend/dist/` are **not** committed to Git (they're gitignored build output) — Railway must run `npm run build` fresh on every deploy to produce them. If the build step is skipped or misconfigured, the app will fail to start (no `dist/index.js` to run), which is the intended, visible failure mode — it should never silently serve stale code.
+
+Under **Settings → Build** / **Deploy** in the dashboard, leave **Build Command** and **Start Command** blank (or explicitly `npm run build` / `npm start`) so Railway uses these scripts directly.
 
 ### 4. Deploy
 
@@ -150,14 +148,15 @@ Push to GitHub:
 git push origin master
 ```
 
-Railway auto-detects Node.js runtime (via root `package.json`), installs dependencies, and executes `start.sh`. View logs in Railway dashboard.
+Railway installs dependencies, runs `npm run build`, then `npm start`. View logs in Railway dashboard under **Deployments** → latest deployment → **Build** tab (confirm you see `vite build` and `tsc` output there — that's proof the build actually ran).
 
 ### Troubleshooting Railway
 
 | Issue | Solution |
 |-------|----------|
 | Build fails: "Cannot find module" | Delete `node_modules` and `package-lock.json`, then push again. Railway reinstalls on redeploy. |
-| "Script start.sh not found" | Ensure `start.sh` is at repo root and committed (`git add start.sh`). |
+| App crashes: "Cannot find module '.../backend/dist/index.js'" | The build step didn't run before start. Check the dashboard's Build Command isn't overridden with something stale (e.g. a reference to a removed `start.sh`); it should be `npm run build` or blank. |
+| Deploy "succeeds" but changes don't show up | Check the live bundle's JS filename (Vite content-hashes it, e.g. `index-XXXXXXXX.js`) — if it never changes across deploys, the build isn't actually rebuilding the frontend. |
 | Port binding error | Port is auto-assigned by Railway. Remove any hardcoded `PORT=3000` from env vars. |
 
 ---
