@@ -27,7 +27,13 @@ export default defineConfig({
         ],
       },
       workbox: {
-        navigateFallback: '/index.html',
+        // vite-plugin-pwa defaults this to 'index.html', which registers a
+        // NavigationRoute that wins over the NetworkFirst rule below for every
+        // navigation — silently pinning every page load to whatever index.html
+        // (and therefore whatever JS bundle) was precached at install time,
+        // even after a new deploy. Explicitly unset so NetworkFirst actually
+        // runs for navigations.
+        navigateFallback: undefined,
         runtimeCaching: [
           {
             urlPattern: ({ request }) => request.mode === 'navigate',
