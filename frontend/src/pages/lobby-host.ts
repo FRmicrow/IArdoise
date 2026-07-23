@@ -166,6 +166,7 @@ export function renderLobbyHost(app: HTMLElement): void {
     });
 
     wsClient.on('GAME_ENDED', () => {
+      clearHostSession();
       window.location.hash = '#/closing';
     });
 

@@ -145,6 +145,7 @@ export function renderGameHost(app: HTMLElement): void {
   });
 
   wsClient.on('GAME_ENDED', () => {
+    localStorage.removeItem('hostSessionId');
     window.location.hash = '#/closing';
   });
 

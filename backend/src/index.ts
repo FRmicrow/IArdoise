@@ -68,11 +68,32 @@ app.get('/ws', { websocket: true }, (socket, _req) => {
 
   app.log.info(`WS connected: ${wsClientId}`);
 
+  // Mobile/WiFi NATs silently drop idle WebSocket connections (typically
+  // after 30-60s of no traffic) without ever firing a close/error event on
+  // either end. A player sitting on the waiting screen looks connected but
+  // is unreachable, so a later broadcast (e.g. GAME_STARTED) never arrives.
+  // Pinging keeps the connection alive and reaps genuinely dead sockets so
+  // the client's own reconnect logic can kick in.
+  let isAlive = true;
+  socket.on('pong', () => {
+    isAlive = true;
+  });
+
+  const heartbeat = setInterval(() => {
+    if (!isAlive) {
+      socket.terminate();
+      return;
+    }
+    isAlive = false;
+    socket.ping();
+  }, 25000);
+
   socket.on('message', (raw: Buffer) => {
     wsRouter.handle(socket, wsClientId, raw.toString());
   });
 
   socket.on('close', () => {
+    clearInterval(heartbeat);
     app.log.info(`WS disconnected: ${wsClientId}`);
     // Trigger connection handler for cleanup
     wsRouter.handle(socket, wsClientId, JSON.stringify({
@@ -83,6 +104,7 @@ app.get('/ws', { websocket: true }, (socket, _req) => {
   });
 
   socket.on('error', (err) => {
+    clearInterval(heartbeat);
     app.log.error(`WS error on ${wsClientId}: ${err.message}`);
     deregister(wsClientId);
   });

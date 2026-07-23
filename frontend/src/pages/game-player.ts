@@ -60,10 +60,16 @@ export function renderGamePlayer(app: HTMLElement): void {
   const wsClient = new WebSocketClient({ role: 'player', playerId, sessionId });
   wsClient.connect();
 
+  const clearPlayerSession = (): void => {
+    localStorage.removeItem('playerId');
+    localStorage.removeItem('playerSessionId');
+  };
+
   wsClient.on('SESSION_STATE', (payload) => {
     if (payload.status === 'active') {
       showActive(payload.currentPhrase);
     } else if (payload.status === 'ended') {
+      clearPlayerSession();
       window.location.hash = '#/closing';
     } else {
       showWaiting();
@@ -96,6 +102,7 @@ export function renderGamePlayer(app: HTMLElement): void {
   });
 
   wsClient.on('GAME_ENDED', () => {
+    clearPlayerSession();
     window.location.hash = '#/closing';
   });
 

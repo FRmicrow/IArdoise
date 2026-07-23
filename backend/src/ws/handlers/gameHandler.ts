@@ -25,6 +25,14 @@ export function registerGameHandler(router: WsRouter): void {
       return;
     }
 
+    if (session.status !== 'lobby') {
+      sendToClient(wsClientId, {
+        type: 'ERROR',
+        payload: { code: 'INVALID_STATE', message: 'Session already started or ended' },
+      });
+      return;
+    }
+
     if (session.players.size < 1) {
       sendToClient(wsClientId, {
         type: 'ERROR',

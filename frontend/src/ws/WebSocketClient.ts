@@ -61,6 +61,7 @@ export class WebSocketClient {
   private socket: WebSocket | null = null;
   private reconnectAttempts = 0;
   private manuallyClosed = false;
+  private visibilityListenerAdded = false;
   private readonly events = new TypedEventEmitter();
 
   constructor(private readonly authPayload: AuthPayload) {}
@@ -89,6 +90,23 @@ export class WebSocketClient {
       this.reconnectAttempts += 1;
       window.setTimeout(() => this.connect(), delay);
     });
+
+    // A backgrounded mobile tab can have its WebSocket killed by the OS/browser
+    // without ever firing 'close' (e.g. screen lock, app switch). Re-check the
+    // connection when the page comes back to the foreground so a silently dead
+    // socket gets replaced instead of leaving the player stuck.
+    if (!this.visibilityListenerAdded) {
+      this.visibilityListenerAdded = true;
+      document.addEventListener('visibilitychange', () => {
+        if (
+          document.visibilityState === 'visible' &&
+          !this.manuallyClosed &&
+          this.socket?.readyState !== WebSocket.OPEN
+        ) {
+          this.connect();
+        }
+      });
+    }
   }
 
   close(): void {
