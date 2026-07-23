@@ -3,7 +3,7 @@ import { renderGamePlayer } from './pages/game-player';
 import { renderJoin } from './pages/join';
 import { renderLobbyHost } from './pages/lobby-host';
 import { renderLogin } from './pages/login';
-import { renderScoreboard } from './pages/scoreboard';
+import { renderClosing } from './pages/closing';
 
 // ── Global ERROR toast ────────────────────────────────────────────────────────
 // Listens for unhandled ERROR WS events dispatched as a custom DOM event.
@@ -13,23 +13,7 @@ import { renderScoreboard } from './pages/scoreboard';
   const toast = document.createElement('div');
   toast.id = 'global-error-toast';
   toast.setAttribute('role', 'alert');
-  toast.style.cssText = [
-    'display:none',
-    'position:fixed',
-    'bottom:24px',
-    'left:50%',
-    'transform:translateX(-50%)',
-    'background:#c00',
-    'color:#fff',
-    'padding:10px 20px',
-    'border-radius:6px',
-    'font-size:0.95rem',
-    'z-index:9999',
-    'max-width:90vw',
-    'text-align:center',
-    'cursor:pointer',
-  ].join(';');
-  toast.title = 'Click to dismiss';
+  toast.title = 'Cliquer pour fermer';
   document.body.appendChild(toast);
 
   let dismissTimer: ReturnType<typeof setTimeout> | undefined;
@@ -46,12 +30,12 @@ import { renderScoreboard } from './pages/scoreboard';
   // Pages dispatch 'ws-error' on window when they receive an unhandled ERROR event
   window.addEventListener('ws-error', (e: Event) => {
     const detail = (e as CustomEvent<{ code: string; message: string }>).detail;
-    showToast(detail?.message ?? 'An unexpected error occurred');
+    showToast(detail?.message ?? "Une erreur inattendue s'est produite");
   });
 })();
 
 function requireHostAuth(): boolean {
-  return Boolean(sessionStorage.getItem('token'));
+  return Boolean(localStorage.getItem('token'));
 }
 
 const routes: Record<string, (app: HTMLElement) => void> = {
@@ -60,15 +44,45 @@ const routes: Record<string, (app: HTMLElement) => void> = {
   '#/host/game': renderGameHost,
   '#/player/game': renderGamePlayer,
   '#/player/wait': renderGamePlayer,
-  '#/scoreboard': renderScoreboard,
+  '#/closing': renderClosing,
 };
 
 function getCurrentRoute(): string {
   if (window.location.pathname.startsWith('/join/')) {
+    const sessionId = window.location.pathname.slice('/join/'.length);
+    const storedPlayerId = localStorage.getItem('playerId');
+    const storedSessionId = localStorage.getItem('playerSessionId');
+
+    // A player who already joined this exact session (QR re-scan, re-shared
+    // link, browser history, PWA shortcut) must resume straight into their
+    // session instead of seeing the join form again (FR-023) — the target
+    // page reconciles against the live session state once its WS connects.
+    if (storedPlayerId && storedSessionId && storedSessionId === sessionId) {
+      history.replaceState(null, '', '/#/player/game');
+      return '#/player/game';
+    }
+
     return '#/join';
   }
 
-  return window.location.hash || '#/login';
+  if (window.location.hash) {
+    return window.location.hash;
+  }
+
+  // Fresh load with no route-specific hash (e.g. a PWA relaunched from the
+  // home screen starts a brand-new browsing context at "/"). Resume directly
+  // into the previously persisted session instead of defaulting to login/join
+  // (FR-023/FR-024) — the target page itself reconciles against the live
+  // session state once its WebSocket connects.
+  if (localStorage.getItem('playerId') && localStorage.getItem('playerSessionId')) {
+    return '#/player/game';
+  }
+
+  if (localStorage.getItem('hostSessionId') && localStorage.getItem('token')) {
+    return '#/host/lobby';
+  }
+
+  return '#/login';
 }
 
 function navigate(): void {
