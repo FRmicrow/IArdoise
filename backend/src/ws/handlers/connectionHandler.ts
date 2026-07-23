@@ -2,6 +2,7 @@ import type { WsRouter } from '../WsRouter.js';
 import { authContext } from './authHandler.js';
 import { SessionManager } from '../../session/SessionManager.js';
 import { broadcastToSession } from '../broadcast.js';
+import { unregisterHost } from '../connectionRegistry.js';
 
 export function registerConnectionHandler(router: WsRouter): void {
   router.register('__DISCONNECT__', (_ws, wsClientId) => {
@@ -15,6 +16,7 @@ export function registerConnectionHandler(router: WsRouter): void {
     if (!session) return;
 
     if (role === 'host') {
+      unregisterHost(sessionId);
       broadcastToSession(sessionId, {
         type: 'HOST_DISCONNECTED',
         payload: {},

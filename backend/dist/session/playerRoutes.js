@@ -20,7 +20,7 @@ export async function playerRoutes(fastify) {
         // Broadcast PLAYER_JOINED to all connected clients in the session
         broadcastToSession(sessionId, {
             type: 'PLAYER_JOINED',
-            payload: { playerId: player.id, name: player.name, score: 0 },
+            payload: { playerId: player.id, name: player.name },
         });
         return reply.code(201).send({ playerId: player.id, name: player.name });
     });

@@ -34,12 +34,29 @@ export function registerPromptHandler(router: WsRouter): void {
       return;
     }
 
-    session.currentPrompt = text;
-    session.prompts.push({ index: session.roundIndex, text, setAt: new Date() });
+    const trimmed = text.trim();
+    if (!trimmed) {
+      sendToClient(wsClientId, {
+        type: 'ERROR',
+        payload: { code: 'VALIDATION_ERROR', message: 'Phrase cannot be empty' },
+      });
+      return;
+    }
+
+    if (session.status !== 'active') {
+      sendToClient(wsClientId, {
+        type: 'ERROR',
+        payload: { code: 'INVALID_STATE', message: 'Session must be active to publish a phrase' },
+      });
+      return;
+    }
+
+    session.currentPhrase = trimmed;
+    session.phrases.push({ index: session.roundIndex, text: trimmed, setAt: new Date() });
 
     broadcastToSession(sessionId, {
       type: 'PROMPT_UPDATED',
-      payload: { text, roundIndex: session.roundIndex },
+      payload: { text: trimmed, roundIndex: session.roundIndex },
     });
   });
 }

@@ -1,47 +1,18 @@
 /**
- * Unit tests: SessionManager + dedupName
+ * Unit tests: SessionManager
  *
  * Covers:
  *   - createSession: creates a session, sets initial state
+ *   - createSession: accepts an optional initialPhrase, trims it
  *   - createSession: enforces single-session-per-host constraint (throws on duplicate)
  *   - addPlayer: adds a player to a session
- *   - addPlayer: calls dedupName to suffix colliding names
+ *   - addPlayer: stores duplicate names as-is (no dedup suffix), no score field
  *   - addPlayer: throws on unknown sessionId
  *   - removeSession: removes session and frees host slot
- *   - dedupName: no-collision path
- *   - dedupName: collision increments suffix from 2 upward
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SessionManager } from '../../src/session/SessionManager.js';
-import { dedupName } from '../../src/session/nameDedup.js';
-
-// ── dedupName unit tests ──────────────────────────────────────────────────────
-
-describe('dedupName', () => {
-  it('returns the candidate unchanged when there is no collision', () => {
-    expect(dedupName(['Alice', 'Bob'], 'Charlie')).toBe('Charlie');
-  });
-
-  it('returns the candidate unchanged when existing list is empty', () => {
-    expect(dedupName([], 'Alice')).toBe('Alice');
-  });
-
-  it('appends " 2" when the candidate already exists', () => {
-    expect(dedupName(['Bob'], 'Bob')).toBe('Bob 2');
-  });
-
-  it('increments suffix when " 2" also collides', () => {
-    expect(dedupName(['Bob', 'Bob 2'], 'Bob')).toBe('Bob 3');
-  });
-
-  it('handles large suffix chains', () => {
-    const existing = ['X', 'X 2', 'X 3', 'X 4'];
-    expect(dedupName(existing, 'X')).toBe('X 5');
-  });
-});
-
-// ── SessionManager unit tests ─────────────────────────────────────────────────
 
 describe('SessionManager', () => {
   let manager: SessionManager;
@@ -59,11 +30,21 @@ describe('SessionManager', () => {
     it('creates a session with correct initial state', () => {
       const session = manager.createSession('host1', 'http://localhost:3000');
       expect(session.status).toBe('lobby');
-      expect(session.currentPrompt).toBe('');
+      expect(session.currentPhrase).toBe('');
       expect(session.roundIndex).toBe(0);
       expect(session.players.size).toBe(0);
-      expect(session.prompts).toEqual([]);
+      expect(session.phrases).toEqual([]);
       expect(session.joinUrl).toMatch(/\/join\//);
+    });
+
+    it('sets currentPhrase from a trimmed initialPhrase when provided', () => {
+      const session = manager.createSession('host1b', 'http://localhost:3000', '  Draw a cat  ');
+      expect(session.currentPhrase).toBe('Draw a cat');
+    });
+
+    it('leaves currentPhrase empty when initialPhrase is omitted', () => {
+      const session = manager.createSession('host1c', 'http://localhost:3000');
+      expect(session.currentPhrase).toBe('');
     });
 
     it('returns the session via getSession using the returned id', () => {
@@ -81,27 +62,46 @@ describe('SessionManager', () => {
       manager.removeSession(s1.id);
       expect(() => manager.createSession('host3', 'http://localhost:3000')).not.toThrow();
     });
+
+    it('allows a second session once the first has ended (host is not stuck after ending a game)', () => {
+      const s1 = manager.createSession('host3b', 'http://localhost:3000');
+      s1.status = 'ended';
+      expect(() => manager.createSession('host3b', 'http://localhost:3000')).not.toThrow();
+    });
+
+    it('still rejects a second session while the first is only in lobby/active status', () => {
+      const s1 = manager.createSession('host3c', 'http://localhost:3000');
+      s1.status = 'active';
+      expect(() => manager.createSession('host3c', 'http://localhost:3000')).toThrow();
+    });
   });
 
   // ── addPlayer ───────────────────────────────────────────────────────────────
 
   describe('addPlayer', () => {
-    it('adds a player and returns correct shape', () => {
+    it('adds a player and returns correct shape, with no score field', () => {
       const session = manager.createSession('host4', 'http://localhost:3000');
       const player = manager.addPlayer(session.id, 'Alice');
       expect(player.name).toBe('Alice');
-      expect(player.score).toBe(0);
+      expect(player).not.toHaveProperty('score');
       expect(player.connectionStatus).toBe('connected');
       expect(player.isHost).toBe(false);
       expect(session.players.get(player.id)).toBe(player);
     });
 
-    it('deduplicates colliding names', () => {
+    it('stores two identical names as-is, with no " 2" suffix', () => {
       const session = manager.createSession('host5', 'http://localhost:3000');
       const p1 = manager.addPlayer(session.id, 'Bob');
       const p2 = manager.addPlayer(session.id, 'Bob');
       expect(p1.name).toBe('Bob');
-      expect(p2.name).toBe('Bob 2');
+      expect(p2.name).toBe('Bob');
+      expect(p1.id).not.toBe(p2.id);
+    });
+
+    it('trims whitespace from the submitted name', () => {
+      const session = manager.createSession('host5b', 'http://localhost:3000');
+      const player = manager.addPlayer(session.id, '  Charlie  ');
+      expect(player.name).toBe('Charlie');
     });
 
     it('sets isHost flag when option is passed', () => {
@@ -112,6 +112,15 @@ describe('SessionManager', () => {
 
     it('throws when sessionId is unknown', () => {
       expect(() => manager.addPlayer('nonexistent-id', 'Alice')).toThrow();
+    });
+  });
+
+  // ── addPlayer — empty roster (US2) ────────────────────────────────────────
+
+  describe('addPlayer — empty roster', () => {
+    it('a freshly created session reports zero players', () => {
+      const session = manager.createSession('host-empty', 'http://localhost:3000');
+      expect(session.players.size).toBe(0);
     });
   });
 

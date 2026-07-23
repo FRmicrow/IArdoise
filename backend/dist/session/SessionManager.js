@@ -1,5 +1,4 @@
 import { randomUUID } from 'crypto';
-import { dedupName } from './nameDedup.js';
 export class SessionManager {
     static instance;
     sessions = new Map();
@@ -12,9 +11,13 @@ export class SessionManager {
         }
         return SessionManager.instance;
     }
-    createSession(hostUsername, baseUrl) {
-        if (this.hostSessionIndex.has(hostUsername)) {
-            throw new Error('Host already has an active session');
+    createSession(hostUsername, baseUrl, initialPhrase) {
+        const existingSessionId = this.hostSessionIndex.get(hostUsername);
+        if (existingSessionId) {
+            const existingSession = this.sessions.get(existingSessionId);
+            if (existingSession && existingSession.status !== 'ended') {
+                throw new Error('Host already has an active session');
+            }
         }
         const id = randomUUID();
         const joinUrl = `${baseUrl}/join/${id}`;
@@ -22,10 +25,10 @@ export class SessionManager {
             id,
             status: 'lobby',
             joinUrl,
-            currentPrompt: '',
+            currentPhrase: initialPhrase?.trim() ?? '',
             roundIndex: 0,
             players: new Map(),
-            prompts: [],
+            phrases: [],
             createdAt: new Date(),
         };
         this.sessions.set(id, session);
@@ -40,13 +43,10 @@ export class SessionManager {
         if (!session) {
             throw new Error('Session not found');
         }
-        const existingNames = Array.from(session.players.values()).map((p) => p.name);
-        const dedupedName = dedupName(existingNames, name.trim());
         const player = {
             id: randomUUID(),
             sessionId,
-            name: dedupedName,
-            score: 0,
+            name: name.trim(),
             connectionStatus: 'connected',
             isHost: options.isHost ?? false,
             wsClientId: options.wsClientId ?? null,

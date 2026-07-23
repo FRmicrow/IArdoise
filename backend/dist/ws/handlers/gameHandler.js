@@ -31,12 +31,7 @@ export function registerGameHandler(router) {
         session.status = 'active';
         broadcastToSession(session.id, {
             type: 'GAME_STARTED',
-            payload: { sessionId: session.id, currentPrompt: session.currentPrompt },
-        });
-        // Also send to host
-        sendToClient(wsClientId, {
-            type: 'GAME_STARTED',
-            payload: { sessionId: session.id, currentPrompt: session.currentPrompt },
+            payload: { sessionId: session.id, currentPhrase: session.currentPhrase },
         });
     });
     // NEXT_QUESTION
@@ -58,67 +53,18 @@ export function registerGameHandler(router) {
             });
             return;
         }
-        if (session.currentPrompt) {
-            session.prompts.push({
+        if (session.currentPhrase) {
+            session.phrases.push({
                 index: session.roundIndex,
-                text: session.currentPrompt,
+                text: session.currentPhrase,
                 setAt: new Date(),
             });
         }
         session.roundIndex++;
-        session.currentPrompt = '';
+        session.currentPhrase = '';
         broadcastToSession(session.id, {
             type: 'QUESTION_ADVANCED',
             payload: { roundIndex: session.roundIndex },
-        });
-        sendToClient(wsClientId, {
-            type: 'QUESTION_ADVANCED',
-            payload: { roundIndex: session.roundIndex },
-        });
-    });
-    // UPDATE_SCORE
-    router.register('UPDATE_SCORE', (_ws, wsClientId, payload) => {
-        const ctx = authContext.get(wsClientId);
-        if (!ctx || ctx.role !== 'host') {
-            sendToClient(wsClientId, {
-                type: 'ERROR',
-                payload: { code: 'UNAUTHORIZED', message: 'Only the host can update scores' },
-            });
-            return;
-        }
-        const p = payload;
-        const session = SessionManager.getInstance().getSession(p['sessionId']);
-        if (!session || session.status !== 'active') {
-            sendToClient(wsClientId, {
-                type: 'ERROR',
-                payload: { code: 'INVALID_STATE', message: 'Session must be active to update scores' },
-            });
-            return;
-        }
-        const player = session.players.get(p['playerId']);
-        if (!player) {
-            sendToClient(wsClientId, {
-                type: 'ERROR',
-                payload: { code: 'VALIDATION_ERROR', message: 'Player not found' },
-            });
-            return;
-        }
-        const delta = p['delta'];
-        if (delta !== 1 && delta !== -1) {
-            sendToClient(wsClientId, {
-                type: 'ERROR',
-                payload: { code: 'VALIDATION_ERROR', message: 'delta must be 1 or -1' },
-            });
-            return;
-        }
-        player.score += delta;
-        broadcastToSession(session.id, {
-            type: 'SCORE_UPDATED',
-            payload: { playerId: player.id, newScore: player.score },
-        });
-        sendToClient(wsClientId, {
-            type: 'SCORE_UPDATED',
-            payload: { playerId: player.id, newScore: player.score },
         });
     });
     // END_GAME
@@ -141,16 +87,9 @@ export function registerGameHandler(router) {
             return;
         }
         session.status = 'ended';
-        const scoreboard = Array.from(session.players.values())
-            .sort((a, b) => b.score - a.score)
-            .map((p) => ({ playerId: p.id, name: p.name, score: p.score }));
         broadcastToSession(session.id, {
             type: 'GAME_ENDED',
-            payload: { scoreboard },
-        });
-        sendToClient(wsClientId, {
-            type: 'GAME_ENDED',
-            payload: { scoreboard },
+            payload: {},
         });
     });
 }

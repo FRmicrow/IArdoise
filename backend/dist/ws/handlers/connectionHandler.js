@@ -1,6 +1,7 @@
 import { authContext } from './authHandler.js';
 import { SessionManager } from '../../session/SessionManager.js';
 import { broadcastToSession } from '../broadcast.js';
+import { unregisterHost } from '../connectionRegistry.js';
 export function registerConnectionHandler(router) {
     router.register('__DISCONNECT__', (_ws, wsClientId) => {
         const ctx = authContext.get(wsClientId);
@@ -12,6 +13,7 @@ export function registerConnectionHandler(router) {
         if (!session)
             return;
         if (role === 'host') {
+            unregisterHost(sessionId);
             broadcastToSession(sessionId, {
                 type: 'HOST_DISCONNECTED',
                 payload: {},

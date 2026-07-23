@@ -4,23 +4,22 @@ export interface Session {
     id: string;
     status: SessionStatus;
     joinUrl: string;
-    currentPrompt: string;
+    currentPhrase: string;
     roundIndex: number;
     players: Map<string, Player>;
-    prompts: Prompt[];
+    phrases: Phrase[];
     createdAt: Date;
 }
 export interface Player {
     id: string;
     sessionId: string;
     name: string;
-    score: number;
     connectionStatus: ConnectionStatus;
     isHost: boolean;
     wsClientId: string | null;
     registeredAt: Date;
 }
-export interface Prompt {
+export interface Phrase {
     index: number;
     text: string;
     setAt: Date;

@@ -6,7 +6,7 @@ export declare class SessionManager {
     private hostSessionIndex;
     private constructor();
     static getInstance(): SessionManager;
-    createSession(hostUsername: string, baseUrl: string): Session;
+    createSession(hostUsername: string, baseUrl: string, initialPhrase?: string): Session;
     getSession(id: string): Session | undefined;
     addPlayer(sessionId: string, name: string, options?: {
         isHost?: boolean;

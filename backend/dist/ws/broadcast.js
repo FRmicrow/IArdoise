@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getAllConnections, getWs } from './connectionRegistry.js';
+import { getAllConnections, getHostWsClientId, getWs } from './connectionRegistry.js';
 import { SessionManager } from '../session/SessionManager.js';
 export function sendToClient(wsClientId, message) {
     const ws = getWs(wsClientId);
@@ -7,6 +7,7 @@ export function sendToClient(wsClientId, message) {
         ws.send(JSON.stringify(message));
     }
 }
+/** Broadcasts to every connected player plus the connected host (who is never a player). */
 export function broadcastToSession(sessionId, message) {
     const session = SessionManager.getInstance().getSession(sessionId);
     if (!session)
@@ -20,14 +21,7 @@ export function broadcastToSession(sessionId, message) {
             }
         }
     }
-}
-/**
- * Broadcast to all clients registered in the connection registry
- * that belong to a given session — including the host if connected.
- */
-export function broadcastToAll(sessionId, message, hostWsClientId) {
-    broadcastToSession(sessionId, message);
-    // Also send to host if they are connected but not yet in the players map
+    const hostWsClientId = getHostWsClientId(sessionId);
     if (hostWsClientId) {
         sendToClient(hostWsClientId, message);
     }

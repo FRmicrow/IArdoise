@@ -1,6 +1,7 @@
 import { verifyToken } from '../../auth/jwt.js';
 import { SessionManager } from '../../session/SessionManager.js';
 import { sendToClient, broadcastToSession } from '../broadcast.js';
+import { registerHost } from '../connectionRegistry.js';
 /** Maps wsClientId → { sessionId, role, playerId? } */
 export const authContext = new Map();
 export function registerAuthHandler(router) {
@@ -46,6 +47,7 @@ export function registerAuthHandler(router) {
                 return;
             }
             authContext.set(wsClientId, { sessionId, role: 'host' });
+            registerHost(sessionId, wsClientId);
         }
         else if (role === 'player') {
             const playerId = p['playerId'];
@@ -97,7 +99,6 @@ function sendSessionState(wsClientId, session) {
     const players = Array.from(session.players.values()).map((p) => ({
         playerId: p.id,
         name: p.name,
-        score: p.score,
         connectionStatus: p.connectionStatus,
     }));
     sendToClient(wsClientId, {
@@ -105,7 +106,7 @@ function sendSessionState(wsClientId, session) {
         payload: {
             sessionId: session.id,
             status: session.status,
-            currentPrompt: session.currentPrompt,
+            currentPhrase: session.currentPhrase,
             roundIndex: session.roundIndex,
             players,
         },

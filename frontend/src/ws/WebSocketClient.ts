@@ -1,34 +1,26 @@
 type SessionStatePayload = {
   sessionId: string;
   status: 'lobby' | 'active' | 'ended';
-  currentPrompt: string;
+  currentPhrase: string;
   roundIndex: number;
   players: Array<{
     playerId: string;
     name: string;
-    score: number;
     connectionStatus: 'connected' | 'disconnected';
   }>;
-};
-
-type ScoreboardEntry = {
-  playerId: string;
-  name: string;
-  score: number;
 };
 
 type EventMap = {
   AUTH_OK: { role: 'host' | 'player' };
   AUTH_ERROR: { message: string };
   SESSION_STATE: SessionStatePayload;
-  PLAYER_JOINED: { playerId: string; name: string; score: number };
+  PLAYER_JOINED: { playerId: string; name: string };
   PLAYER_DISCONNECTED: { playerId: string };
   PLAYER_RECONNECTED: { playerId: string };
-  GAME_STARTED: { sessionId: string; currentPrompt: string };
+  GAME_STARTED: { sessionId: string; currentPhrase: string };
   PROMPT_UPDATED: { text: string; roundIndex: number };
   QUESTION_ADVANCED: { roundIndex: number };
-  SCORE_UPDATED: { playerId: string; newScore: number };
-  GAME_ENDED: { scoreboard: ScoreboardEntry[] };
+  GAME_ENDED: Record<string, never>;
   HOST_DISCONNECTED: Record<string, never>;
   ERROR: { code: string; message: string };
 };

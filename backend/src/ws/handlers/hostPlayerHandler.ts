@@ -51,7 +51,7 @@ export function registerHostPlayerHandler(router: WsRouter): void {
     // will deliver PLAYER_JOINED to all connected clients including the host themselves.
     broadcastToSession(sessionId, {
       type: 'PLAYER_JOINED',
-      payload: { playerId: player.id, name: player.name, score: 0 },
+      payload: { playerId: player.id, name: player.name },
     });
   });
 }

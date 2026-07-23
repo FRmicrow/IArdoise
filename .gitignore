@@ -9,6 +9,10 @@ yarn.lock
 /frontend/dist/
 /build/
 
+# Test artifacts
+/frontend/test-results/
+/frontend/playwright-report/
+
 # Environment variables (secrets)
 .env
 .env.local
