@@ -69,20 +69,24 @@ export class WebSocketClient {
   connect(): void {
     this.manuallyClosed = false;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+    this.socket = socket;
 
-    this.socket.addEventListener('open', () => {
+    socket.addEventListener('open', () => {
       this.reconnectAttempts = 0;
       this.send('AUTH', this.authPayload);
     });
 
-    this.socket.addEventListener('message', (event) => {
+    socket.addEventListener('message', (event) => {
       const message = JSON.parse(event.data) as { type: EventType; payload: EventMap[EventType] };
       this.events.emit(message.type, message.payload as never);
     });
 
-    this.socket.addEventListener('close', () => {
-      if (this.manuallyClosed) {
+    socket.addEventListener('close', () => {
+      // A stale socket we force-replaced (e.g. from visibilitychange) is no
+      // longer this.socket by the time its close event fires — ignore it so
+      // we don't schedule a second reconnect on top of the replacement.
+      if (this.manuallyClosed || this.socket !== socket) {
         return;
       }
 
@@ -98,11 +102,8 @@ export class WebSocketClient {
     if (!this.visibilityListenerAdded) {
       this.visibilityListenerAdded = true;
       document.addEventListener('visibilitychange', () => {
-        if (
-          document.visibilityState === 'visible' &&
-          !this.manuallyClosed &&
-          this.socket?.readyState !== WebSocket.OPEN
-        ) {
+        if (document.visibilityState === 'visible' && !this.manuallyClosed) {
+          this.socket?.close();
           this.connect();
         }
       });
