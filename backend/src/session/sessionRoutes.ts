@@ -2,19 +2,26 @@ import type { FastifyInstance } from 'fastify';
 import { authMiddleware } from '../auth/middleware.js';
 import { SessionManager } from './SessionManager.js';
 import { generateQrDataUrl } from '../qr/generateQr.js';
+import { createSessionBodySchema, resolveSessionSettings } from '../schemas/sessionSettings.js';
 
 export async function sessionRoutes(fastify: FastifyInstance): Promise<void> {
   // POST /api/sessions — create session (host only)
-  fastify.post<{ Body: { initialPhrase?: unknown } }>('/', {
+  fastify.post('/', {
     preHandler: authMiddleware,
   }, async (request, reply) => {
     const user = request.user!;
     const baseUrl = `${request.protocol}://${request.headers.host ?? request.hostname}`;
-    const rawInitialPhrase = request.body?.initialPhrase;
-    const initialPhrase = typeof rawInitialPhrase === 'string' ? rawInitialPhrase.trim() : undefined;
+
+    const parsed = createSessionBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request body' });
+    }
+
+    const initialPhrase = parsed.data.initialPhrase?.trim();
+    const settings = resolveSessionSettings(parsed.data);
 
     try {
-      const session = SessionManager.getInstance().createSession(user.username, baseUrl, initialPhrase);
+      const session = SessionManager.getInstance().createSession(user.username, baseUrl, initialPhrase, settings);
       return reply.code(201).send({
         sessionId: session.id,
         joinUrl: session.joinUrl,

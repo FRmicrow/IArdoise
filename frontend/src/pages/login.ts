@@ -45,6 +45,6 @@ export function renderLogin(app: HTMLElement): void {
 
     const body = (await response.json()) as { token: string };
     localStorage.setItem('token', body.token);
-    window.location.hash = '#/host/lobby';
+    window.location.hash = '#/host/hub';
   });
 }

@@ -69,6 +69,14 @@ export function registerGameHandler(router: WsRouter): void {
       return;
     }
 
+    if (!SessionManager.getInstance().canAdvanceRound(session)) {
+      sendToClient(wsClientId, {
+        type: 'ERROR',
+        payload: { code: 'INVALID_STATE', message: 'Already at the last configured round' },
+      });
+      return;
+    }
+
     if (session.currentPhrase) {
       session.phrases.push({
         index: session.roundIndex,
@@ -78,10 +86,13 @@ export function registerGameHandler(router: WsRouter): void {
     }
     session.roundIndex++;
     session.currentPhrase = '';
+    for (const player of session.players.values()) {
+      player.finishedCurrentRound = false;
+    }
 
     broadcastToSession(session.id, {
       type: 'QUESTION_ADVANCED',
-      payload: { roundIndex: session.roundIndex },
+      payload: { roundIndex: session.roundIndex, maxRounds: session.settings.maxRounds },
     });
   });
 
@@ -108,9 +119,13 @@ export function registerGameHandler(router: WsRouter): void {
 
     session.status = 'ended';
 
+    const results = session.settings.pointsEnabled
+      ? SessionManager.getInstance().computeResults(session.id)
+      : [];
+
     broadcastToSession(session.id, {
       type: 'GAME_ENDED',
-      payload: {},
+      payload: { pointsEnabled: session.settings.pointsEnabled, results },
     });
   });
 }

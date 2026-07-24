@@ -1,3 +1,10 @@
+type SessionSettingsPayload = {
+  roundDurationSec: number;
+  maxRounds: number;
+  maxPlayers: number;
+  pointsEnabled: boolean;
+};
+
 type SessionStatePayload = {
   sessionId: string;
   status: 'lobby' | 'active' | 'ended';
@@ -7,7 +14,17 @@ type SessionStatePayload = {
     playerId: string;
     name: string;
     connectionStatus: 'connected' | 'disconnected';
+    finishedCurrentRound: boolean;
   }>;
+  settings: SessionSettingsPayload;
+  cumulativeScores: Record<string, number>;
+};
+
+type PlayerResultPayload = {
+  playerId: string;
+  name: string;
+  totalPoints: number;
+  rank: number;
 };
 
 type EventMap = {
@@ -17,10 +34,12 @@ type EventMap = {
   PLAYER_JOINED: { playerId: string; name: string };
   PLAYER_DISCONNECTED: { playerId: string };
   PLAYER_RECONNECTED: { playerId: string };
+  PLAYER_FINISHED: { playerId: string };
+  SCORES_UPDATED: { roundIndex: number; totals: Record<string, number> };
   GAME_STARTED: { sessionId: string; currentPhrase: string };
   PROMPT_UPDATED: { text: string; roundIndex: number };
-  QUESTION_ADVANCED: { roundIndex: number };
-  GAME_ENDED: Record<string, never>;
+  QUESTION_ADVANCED: { roundIndex: number; maxRounds: number };
+  GAME_ENDED: { pointsEnabled: boolean; results: PlayerResultPayload[] };
   HOST_DISCONNECTED: Record<string, never>;
   PONG: Record<string, never>;
   ERROR: { code: string; message: string };

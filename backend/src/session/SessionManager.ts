@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
-import type { Session, Player } from './types.js';
+import type { Session, Player, SessionSettings } from './types.js';
+import { DEFAULT_SESSION_SETTINGS } from '../schemas/sessionSettings.js';
 
 export class SessionManager {
   private static instance: SessionManager;
@@ -16,7 +17,12 @@ export class SessionManager {
     return SessionManager.instance;
   }
 
-  createSession(hostUsername: string, baseUrl: string, initialPhrase?: string): Session {
+  createSession(
+    hostUsername: string,
+    baseUrl: string,
+    initialPhrase?: string,
+    settings: SessionSettings = DEFAULT_SESSION_SETTINGS,
+  ): Session {
     const existingSessionId = this.hostSessionIndex.get(hostUsername);
     if (existingSessionId) {
       const existingSession = this.sessions.get(existingSessionId);
@@ -36,6 +42,8 @@ export class SessionManager {
       players: new Map(),
       phrases: [],
       createdAt: new Date(),
+      settings,
+      roundScores: new Map(),
     };
 
     this.sessions.set(id, session);
@@ -45,6 +53,61 @@ export class SessionManager {
 
   getSession(id: string): Session | undefined {
     return this.sessions.get(id);
+  }
+
+  /** True while the session can still move to a further round (FR-009). */
+  canAdvanceRound(session: Session): boolean {
+    return session.roundIndex + 1 < session.settings.maxRounds;
+  }
+
+  /** Marks a single player as done drawing for the round in progress (FR-012). */
+  setFinishedCurrentRound(sessionId: string, playerId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error('Session not found');
+    }
+    const player = session.players.get(playerId);
+    if (!player) {
+      throw new Error('Player not found');
+    }
+    player.finishedCurrentRound = true;
+  }
+
+  /**
+   * Stores a round's points, keyed by playerId. Idempotent: awarding the
+   * same round twice overwrites rather than accumulates (FR-011).
+   */
+  awardRoundPoints(sessionId: string, roundIndex: number, points: Record<string, number>): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error('Session not found');
+    }
+    session.roundScores.set(roundIndex, new Map(Object.entries(points)));
+  }
+
+  /**
+   * Ranked results across every player in the session, summing points from
+   * every scored round. Unscored rounds/players contribute 0. Ties are
+   * broken by join order — `session.players` is a Map, insertion-ordered by
+   * `addPlayer`, and Array.sort is stable, so no explicit tiebreaker needed.
+   */
+  computeResults(sessionId: string): Array<{ playerId: string; name: string; totalPoints: number; rank: number }> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error('Session not found');
+    }
+
+    const totals = Array.from(session.players.values()).map((player) => {
+      let totalPoints = 0;
+      for (const roundPoints of session.roundScores.values()) {
+        totalPoints += roundPoints.get(player.id) ?? 0;
+      }
+      return { playerId: player.id, name: player.name, totalPoints };
+    });
+
+    totals.sort((a, b) => b.totalPoints - a.totalPoints);
+
+    return totals.map((entry, index) => ({ ...entry, rank: index + 1 }));
   }
 
   addPlayer(
@@ -65,6 +128,7 @@ export class SessionManager {
       isHost: options.isHost ?? false,
       wsClientId: options.wsClientId ?? null,
       registeredAt: new Date(),
+      finishedCurrentRound: false,
     };
 
     session.players.set(player.id, player);

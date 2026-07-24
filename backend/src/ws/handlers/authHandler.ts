@@ -118,7 +118,17 @@ function sendSessionState(wsClientId: string, session: Session): void {
     playerId: p.id,
     name: p.name,
     connectionStatus: p.connectionStatus,
+    finishedCurrentRound: p.finishedCurrentRound,
   }));
+
+  const cumulativeScores: Record<string, number> = {};
+  for (const player of session.players.values()) {
+    let total = 0;
+    for (const roundPoints of session.roundScores.values()) {
+      total += roundPoints.get(player.id) ?? 0;
+    }
+    cumulativeScores[player.id] = total;
+  }
 
   sendToClient(wsClientId, {
     type: 'SESSION_STATE',
@@ -128,6 +138,8 @@ function sendSessionState(wsClientId: string, session: Session): void {
       currentPhrase: session.currentPhrase,
       roundIndex: session.roundIndex,
       players,
+      settings: session.settings,
+      cumulativeScores,
     },
   });
 }

@@ -16,6 +16,15 @@ export function renderGamePlayer(app: HTMLElement): void {
       <div id="waiting" class="waiting-banner">En attente du début de la partie…</div>
       <p id="phrase" class="phrase-label"></p>
       <div id="canvas-container" class="canvas-container"></div>
+      <div id="finish-row" class="finish-row">
+        <button id="finish-drawing" type="button" class="btn btn-primary" style="width: 100%;">J'ai fini !</button>
+      </div>
+      <div id="draw-wait" class="overlay">
+        <div>
+          <p class="text-hand" style="font-size: 1.5rem;">chef-d'œuvre envoyé !</p>
+          <p>L'hôte regarde les dessins…</p>
+        </div>
+      </div>
       <div id="host-disconnected-overlay" class="overlay">Hôte déconnecté — en attente de reconnexion…</div>
     </main>
   `;
@@ -23,9 +32,12 @@ export function renderGamePlayer(app: HTMLElement): void {
   const waiting = app.querySelector<HTMLDivElement>('#waiting');
   const phrase = app.querySelector<HTMLParagraphElement>('#phrase');
   const canvasContainer = app.querySelector<HTMLDivElement>('#canvas-container');
+  const finishRow = app.querySelector<HTMLDivElement>('#finish-row');
+  const finishButton = app.querySelector<HTMLButtonElement>('#finish-drawing');
+  const drawWait = app.querySelector<HTMLDivElement>('#draw-wait');
   const hostDisconnectedOverlay = app.querySelector<HTMLDivElement>('#host-disconnected-overlay');
 
-  if (!waiting || !phrase || !canvasContainer || !hostDisconnectedOverlay) {
+  if (!waiting || !phrase || !canvasContainer || !finishRow || !finishButton || !drawWait || !hostDisconnectedOverlay) {
     return;
   }
 
@@ -47,10 +59,17 @@ export function renderGamePlayer(app: HTMLElement): void {
     }
   };
 
+  const showDrawing = (): void => {
+    drawWait.style.display = 'none';
+    canvasContainer.style.display = '';
+    finishRow.style.display = '';
+  };
+
   const showActive = (currentPhrase: string): void => {
     waiting.style.display = 'none';
     phrase.textContent = currentPhrase;
     mountCanvas();
+    showDrawing();
     goToHash('#/player/game');
   };
 
@@ -62,17 +81,17 @@ export function renderGamePlayer(app: HTMLElement): void {
   const wsClient = new WebSocketClient({ role: 'player', playerId, sessionId });
   wsClient.connect();
 
-  const clearPlayerSession = (): void => {
-    localStorage.removeItem('playerId');
-    localStorage.removeItem('playerSessionId');
-  };
-
   wsClient.on('SESSION_STATE', (payload) => {
     if (payload.status === 'active') {
       showActive(payload.currentPhrase);
+      const self = payload.players.find((p) => p.playerId === playerId);
+      if (self?.finishedCurrentRound) {
+        canvasContainer.style.display = 'none';
+        finishRow.style.display = 'none';
+        drawWait.style.display = 'flex';
+      }
     } else if (payload.status === 'ended') {
-      clearPlayerSession();
-      window.location.hash = '#/closing';
+      window.location.hash = '#/results';
     } else {
       showWaiting();
     }
@@ -89,6 +108,7 @@ export function renderGamePlayer(app: HTMLElement): void {
   wsClient.on('QUESTION_ADVANCED', () => {
     drawingCanvas?.clear();
     phrase.textContent = '';
+    showDrawing();
   });
 
   wsClient.on('ERROR', (payload) => {
@@ -104,8 +124,14 @@ export function renderGamePlayer(app: HTMLElement): void {
   });
 
   wsClient.on('GAME_ENDED', () => {
-    clearPlayerSession();
-    window.location.hash = '#/closing';
+    window.location.hash = '#/results';
+  });
+
+  finishButton.addEventListener('click', () => {
+    wsClient.send('MARK_DRAWING_DONE', { sessionId });
+    canvasContainer.style.display = 'none';
+    finishRow.style.display = 'none';
+    drawWait.style.display = 'flex';
   });
 
   window.addEventListener('hashchange', () => {

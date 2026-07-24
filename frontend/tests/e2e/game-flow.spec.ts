@@ -54,22 +54,60 @@ async function loginAsHost(page: Page): Promise<void> {
   await page.fill('#username', 'admin');
   await page.fill('#password', process.env['HOST_PASSWORD'] ?? 'password');
   await page.click('button[type="submit"]');
+  await page.waitForURL(`${BASE_URL}/#/host/hub`, { timeout: 5000 });
+}
+
+// Logs in, picks the one playable hub entry, configures a session with the
+// given chip selections, and creates it — landing on the lobby exactly like
+// createAndJoinActiveSession's pre-004 helper used to, but now via the hub
+// (US3) and dedicated config screen (US1).
+async function createConfiguredSession(
+  page: Page,
+  options: { durationSec: 30 | 60 | 90 | 120; rounds: 3 | 5 | 10; phrase: string },
+): Promise<void> {
+  await loginAsHost(page);
+  await page.click('[data-game-key="ardoise"]');
+  await page.waitForURL(`${BASE_URL}/#/host/config`, { timeout: 5000 });
+  await page.click(`#duration-${options.durationSec}`);
+  await page.click(`#rounds-${options.rounds}`);
+  await page.fill('#initial-phrase-input', options.phrase);
+  await page.click('#create-game');
   await page.waitForURL(`${BASE_URL}/#/host/lobby`, { timeout: 5000 });
 }
 
+// The canvas background is themeable (--color-canvas-bg, 004's retheme moved
+// it off pure black), so "is this pixel ink" must be judged relative to the
+// page's actual current background color rather than an assumed near-zero
+// RGB — otherwise a mid-tone background itself reads as "ink" everywhere.
+const INK_DELTA_THRESHOLD = 30;
+
+async function getCanvasBackgroundRgb(page: Page): Promise<[number, number, number]> {
+  const hex = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--color-canvas-bg').trim(),
+  );
+  const match = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(hex);
+  if (!match) return [0, 0, 0];
+  return [parseInt(match[1]!, 16), parseInt(match[2]!, 16), parseInt(match[3]!, 16)];
+}
+
 async function hasNonBackgroundPixel(page: Page, canvasSelector: string): Promise<boolean> {
-  return page.locator(canvasSelector).evaluate((el) => {
+  const bg = await getCanvasBackgroundRgb(page);
+  return page.locator(canvasSelector).evaluate((el, [bgR, bgG, bgB]) => {
     const canvas = el as HTMLCanvasElement;
     const context = canvas.getContext('2d');
     if (!context) return false;
     const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
     for (let i = 0; i < data.length; i += 4) {
-      if (data[i] > 10 || data[i + 1] > 10 || data[i + 2] > 10) {
+      if (
+        Math.abs(data[i]! - bgR) > 30 ||
+        Math.abs(data[i + 1]! - bgG) > 30 ||
+        Math.abs(data[i + 2]! - bgB) > 30
+      ) {
         return true;
       }
     }
     return false;
-  });
+  }, bg);
 }
 
 // Drives a minimal host+player flow up to the player's active drawing
@@ -85,8 +123,10 @@ async function createAndJoinActiveSession(
   playerName: string,
 ): Promise<Page> {
   await loginAsHost(page);
+  await page.click('[data-game-key="ardoise"]');
+  await page.waitForURL(`${BASE_URL}/#/host/config`, { timeout: 5000 });
   await page.fill('#initial-phrase-input', phrase);
-  await page.click('#new-game');
+  await page.click('#create-game');
   await page.waitForSelector('#qr-code[src]', { timeout: 5000 });
   const joinUrl = (await page.textContent('#join-url'))!.trim();
 
@@ -106,7 +146,7 @@ async function createAndJoinActiveSession(
 async function endSession(page: Page): Promise<void> {
   page.once('dialog', (dialog) => dialog.accept());
   await page.click('#end-game');
-  await page.waitForURL(`${BASE_URL}/#/closing`, { timeout: 5000 });
+  await page.waitForURL(`${BASE_URL}/#/results`, { timeout: 5000 });
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -120,8 +160,10 @@ test.describe('Full game flow', () => {
 
     // US1 — admin creates a session with an initial phrase
     await loginAsHost(page);
+    await page.click('[data-game-key="ardoise"]');
+    await page.waitForURL(`${BASE_URL}/#/host/config`, { timeout: 5000 });
     await page.fill('#initial-phrase-input', 'Dessine un chat');
-    await page.click('#new-game');
+    await page.click('#create-game');
 
     await page.waitForSelector('#qr-code[src]', { timeout: 5000 });
     expect(await page.isVisible('#qr-code')).toBe(true);
@@ -330,12 +372,12 @@ test.describe('Full game flow', () => {
     await page.waitForTimeout(300);
     await expect(alice.locator('#phrase')).toHaveText('Dessine un chien');
 
-    // US5 — ending the game moves every connected player to the closing screen
+    // US5 — ending the game moves every connected player to the results screen
     page.once('dialog', (dialog) => dialog.accept());
     await page.click('#end-game');
-    await page.waitForURL(`${BASE_URL}/#/closing`, { timeout: 5000 });
-    await alice.waitForURL(`${BASE_URL}/#/closing`, { timeout: 5000 });
-    await alice2.waitForURL(`${BASE_URL}/#/closing`, { timeout: 5000 });
+    await page.waitForURL(`${BASE_URL}/#/results`, { timeout: 5000 });
+    await alice.waitForURL(`${BASE_URL}/#/results`, { timeout: 5000 });
+    await alice2.waitForURL(`${BASE_URL}/#/results`, { timeout: 5000 });
 
     // US5 — a fresh join attempt at the same URL now shows the "ended"
     // message. Isolated context, same reasoning as lateActiveJoiner above.
@@ -373,18 +415,21 @@ test.describe('Mobile drawing screen — fullscreen and toolbar (003-mobile-canv
           parseFloat(styles.getPropertyValue('--space-sm')),
         ];
       });
-      // .page--full's only "chrome" not covered by the phrase/canvas boxes
-      // themselves is 2×space-md vertical padding plus 2 row gaps of
-      // space-sm (three grid rows: waiting/phrase/canvas — waiting collapses
-      // to 0 height once hidden, per style.css's explicit grid-row rules).
-      const chrome = spaceMd * 2 + spaceSm * 2;
+      // .page--full's only "chrome" not covered by the phrase/canvas/finish-row
+      // boxes themselves is 2×space-md vertical padding plus 3 row gaps of
+      // space-sm (four grid rows: waiting/phrase/canvas/finish-row — waiting
+      // collapses to 0 height once hidden, per style.css's explicit
+      // grid-row rules; finish-row holds the "J'ai fini !" action, 004).
+      const chrome = spaceMd * 2 + spaceSm * 3;
 
       const phraseBox = await player.locator('#phrase').boundingBox();
       const canvasBox = await player.locator('#canvas-container').boundingBox();
+      const finishRowBox = await player.locator('#finish-row').boundingBox();
       expect(phraseBox).not.toBeNull();
       expect(canvasBox).not.toBeNull();
+      expect(finishRowBox).not.toBeNull();
 
-      const contentHeight = phraseBox!.height + canvasBox!.height;
+      const contentHeight = phraseBox!.height + canvasBox!.height + finishRowBox!.height;
       expect(Math.abs(contentHeight + chrome - viewport!.height)).toBeLessThanOrEqual(3);
     };
 
@@ -396,8 +441,9 @@ test.describe('Mobile drawing screen — fullscreen and toolbar (003-mobile-canv
     // near an edge may legitimately fall outside a smaller canvas, but this
     // one never gets close to any edge in either orientation).
     const lowerCanvas = player.locator('#canvas-container canvas.lower-canvas');
+    const originBg = await getCanvasBackgroundRgb(player);
     const hasInkNearOrigin = async (): Promise<boolean> =>
-      lowerCanvas.evaluate((el) => {
+      lowerCanvas.evaluate((el, [bgR, bgG, bgB]) => {
         const canvas = el as HTMLCanvasElement;
         const context = canvas.getContext('2d');
         if (!context) return false;
@@ -406,10 +452,16 @@ test.describe('Mobile drawing screen — fullscreen and toolbar (003-mobile-canv
         const scaleY = canvas.height / rect.height;
         const { data } = context.getImageData(0, 0, Math.round(45 * scaleX), Math.round(45 * scaleY));
         for (let i = 0; i < data.length; i += 4) {
-          if (data[i] > 10 || data[i + 1] > 10 || data[i + 2] > 10) return true;
+          if (
+            Math.abs(data[i]! - bgR) > 30 ||
+            Math.abs(data[i + 1]! - bgG) > 30 ||
+            Math.abs(data[i + 2]! - bgB) > 30
+          ) {
+            return true;
+          }
         }
         return false;
-      });
+      }, originBg);
 
     const canvasBox = (await lowerCanvas.boundingBox())!;
     await player.mouse.move(canvasBox.x + 15, canvasBox.y + 15);
@@ -443,9 +495,10 @@ test.describe('Mobile drawing screen — fullscreen and toolbar (003-mobile-canv
       await player.mouse.up();
     };
 
+    const eraserBg = await getCanvasBackgroundRgb(player);
     const hasInkAt = async (cssX: number, cssY: number): Promise<boolean> =>
       lowerCanvas.evaluate(
-        (el, [x, y]) => {
+        (el, [x, y, bgR, bgG, bgB]) => {
           const canvas = el as HTMLCanvasElement;
           const context = canvas.getContext('2d');
           if (!context) return false;
@@ -460,11 +513,17 @@ test.describe('Mobile drawing screen — fullscreen and toolbar (003-mobile-canv
             size,
           ).data;
           for (let i = 0; i < data.length; i += 4) {
-            if (data[i] > 10 || data[i + 1] > 10 || data[i + 2] > 10) return true;
+            if (
+              Math.abs(data[i]! - bgR) > 30 ||
+              Math.abs(data[i + 1]! - bgG) > 30 ||
+              Math.abs(data[i + 2]! - bgB) > 30
+            ) {
+              return true;
+            }
           }
           return false;
         },
-        [cssX, cssY],
+        [cssX, cssY, ...eraserBg] as [number, number, number, number, number],
       );
 
     // Stroke A and stroke B: two horizontal segments far enough apart that
@@ -565,9 +624,10 @@ test.describe('Mobile drawing screen — fullscreen and toolbar (003-mobile-canv
     // Approximates rendered stroke thickness in px by counting non-background
     // pixels along a short vertical scan line perpendicular to a horizontal
     // stroke, centered on it.
+    const thicknessBg = await getCanvasBackgroundRgb(player);
     const strokeThicknessAt = async (cssX: number, cssYCenter: number): Promise<number> =>
       lowerCanvas.evaluate(
-        (el, [x, yCenter]) => {
+        (el, [x, yCenter, bgR, bgG, bgB]) => {
           const canvas = el as HTMLCanvasElement;
           const context = canvas.getContext('2d')!;
           const rect = canvas.getBoundingClientRect();
@@ -580,11 +640,17 @@ test.describe('Mobile drawing screen — fullscreen and toolbar (003-mobile-canv
           const data = context.getImageData(px, topY, 1, height).data;
           let count = 0;
           for (let i = 0; i < data.length; i += 4) {
-            if (data[i] > 10 || data[i + 1] > 10 || data[i + 2] > 10) count++;
+            if (
+              Math.abs(data[i]! - bgR) > 30 ||
+              Math.abs(data[i + 1]! - bgG) > 30 ||
+              Math.abs(data[i + 2]! - bgB) > 30
+            ) {
+              count++;
+            }
           }
           return count;
         },
-        [cssX, cssYCenter],
+        [cssX, cssYCenter, ...thicknessBg] as [number, number, number, number, number],
       );
 
     // First stroke, drawn at the default width.
@@ -608,5 +674,148 @@ test.describe('Mobile drawing screen — fullscreen and toolbar (003-mobile-canv
     expect(await strokeThicknessAt(65, 60)).toBe(defaultThickness);
 
     await endSession(page);
+  });
+});
+
+test.describe('Party game hub, rounds, and podium (004-party-game-hub)', () => {
+  test('US1 — configured rounds are counted, timed, and bounded', async ({ page, context }) => {
+    test.setTimeout(30000);
+
+    await createConfiguredSession(page, { durationSec: 30, rounds: 3, phrase: 'Manche un' });
+    await page.waitForSelector('#qr-code[src]', { timeout: 5000 });
+    const joinUrl = (await page.textContent('#join-url'))!.trim();
+
+    const player = await context.newPage();
+    await player.goto(joinUrl);
+    await player.fill('#name', 'Gaspard');
+    await player.click('#join-form button[type="submit"]');
+    await player.waitForURL(`${BASE_URL}/#/player/game`, { timeout: 5000 });
+
+    await page.click('#start-game');
+    await page.waitForURL(`${BASE_URL}/#/host/game`, { timeout: 5000 });
+
+    await expect(page.locator('#round-counter')).toHaveText('Manche 1/3');
+    await expect(page.locator('#round-timer')).toHaveText('0:30', { timeout: 3000 });
+    await expect
+      .poll(async () => page.locator('#round-timer').textContent(), { timeout: 3000 })
+      .not.toBe('0:30');
+
+    // Round 1 -> 2
+    await page.click('#next-question');
+    await expect(page.locator('#round-counter')).toHaveText('Manche 2/3');
+    await expect(page.locator('#round-timer')).toHaveText('0:30');
+
+    // Round 2 -> 3 (last configured round)
+    await page.click('#next-question');
+    await expect(page.locator('#round-counter')).toHaveText('Manche 3/3');
+    await expect(page.locator('#next-question')).toBeDisabled();
+
+    await endSession(page);
+  });
+
+  test('US2 — player finishes drawing, host scores rounds (skipping one), and podium matches on both ends', async ({ page, context }) => {
+    test.setTimeout(30000);
+
+    await createConfiguredSession(page, { durationSec: 30, rounds: 3, phrase: 'Manche un' });
+    await page.waitForSelector('#qr-code[src]', { timeout: 5000 });
+    const joinUrl = (await page.textContent('#join-url'))!.trim();
+
+    const player = await context.newPage();
+    await player.goto(joinUrl);
+    await player.fill('#name', 'Ines');
+    await player.click('#join-form button[type="submit"]');
+    await player.waitForURL(`${BASE_URL}/#/player/game`, { timeout: 5000 });
+
+    await page.click('#start-game');
+    await page.waitForURL(`${BASE_URL}/#/host/game`, { timeout: 5000 });
+
+    const scoreRow = page.locator('[data-player-name="Ines"]');
+    await expect(scoreRow.locator('[data-role="points-status"]')).toHaveText('dessine…', { timeout: 3000 });
+
+    // Player signals they're done; host sees the live status change (FR-012/FR-013)
+    await player.click('#finish-drawing');
+    await expect(player.locator('#draw-wait')).toBeVisible();
+    await expect(scoreRow.locator('[data-role="points-status"]')).toHaveText('a terminé ✓', { timeout: 3000 });
+
+    // Round 1 scored
+    await scoreRow.locator('[data-role="points-input"]').fill('7');
+    await page.click('#submit-scores');
+
+    // Round 2 -> deliberately NOT scored (FR-011 non-blocking)
+    await page.click('#next-question');
+    await expect(page.locator('#round-counter')).toHaveText('Manche 2/3');
+    await page.click('#next-question');
+    await expect(page.locator('#round-counter')).toHaveText('Manche 3/3');
+
+    // Round 3 scored
+    await scoreRow.locator('[data-role="points-input"]').fill('3');
+    await page.click('#submit-scores');
+
+    // End the game (not necessarily on a scored round boundary constraint)
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.click('#end-game');
+    await page.waitForURL(`${BASE_URL}/#/results`, { timeout: 5000 });
+    await player.waitForURL(`${BASE_URL}/#/results`, { timeout: 5000 });
+
+    // Both host and player see the same podium/total — 7 + 0 + 3 = 10
+    await expect(page.locator('[data-player-name="Ines"] [data-role="points"]')).toHaveText('10 pts', { timeout: 5000 });
+    await expect(player.locator('[data-player-name="Ines"] [data-role="points"]')).toHaveText('10 pts', { timeout: 5000 });
+
+    await player.close();
+  });
+
+  test('US2 — results show a plain participant list, no podium, when points are disabled', async ({ page, context }) => {
+    test.setTimeout(20000);
+
+    await loginAsHost(page);
+    await page.click('[data-game-key="ardoise"]');
+    await page.waitForURL(`${BASE_URL}/#/host/config`, { timeout: 5000 });
+    await page.click('#points-toggle');
+    await page.fill('#initial-phrase-input', 'Sans points');
+    await page.click('#create-game');
+    await page.waitForURL(`${BASE_URL}/#/host/lobby`, { timeout: 5000 });
+    await page.waitForSelector('#qr-code[src]', { timeout: 5000 });
+    const joinUrl = (await page.textContent('#join-url'))!.trim();
+
+    const player = await context.newPage();
+    await player.goto(joinUrl);
+    await player.fill('#name', 'Jules');
+    await player.click('#join-form button[type="submit"]');
+    await player.waitForURL(`${BASE_URL}/#/player/game`, { timeout: 5000 });
+
+    await page.click('#start-game');
+    await page.waitForURL(`${BASE_URL}/#/host/game`, { timeout: 5000 });
+    await expect(page.locator('#scoring-section')).toBeHidden();
+
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.click('#end-game');
+    await page.waitForURL(`${BASE_URL}/#/results`, { timeout: 5000 });
+
+    await expect(page.locator('#podium')).toBeHidden();
+    await expect(page.locator('#participant-list')).toContainText('Jules');
+
+    await player.close();
+  });
+
+  test('US3 — hub lists the playable game and inert placeholders', async ({ page }) => {
+    test.setTimeout(15000);
+
+    await page.goto(`${BASE_URL}/#/login`);
+    await page.fill('#username', 'admin');
+    await page.fill('#password', process.env['HOST_PASSWORD'] ?? 'password');
+    await page.click('button[type="submit"]');
+    await page.waitForURL(`${BASE_URL}/#/host/hub`, { timeout: 5000 });
+
+    const playableCard = page.locator('[data-game-key="ardoise"]');
+    await expect(playableCard).toHaveAttribute('data-playable', 'true');
+
+    const inertCard = page.locator('.card[data-playable="false"]').first();
+    await expect(inertCard).toBeVisible();
+    await inertCard.click();
+    await page.waitForTimeout(300);
+    expect(page.url()).toContain('#/host/hub');
+
+    await playableCard.click();
+    await page.waitForURL(`${BASE_URL}/#/host/config`, { timeout: 5000 });
   });
 });

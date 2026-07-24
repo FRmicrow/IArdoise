@@ -3,7 +3,9 @@ import { renderGamePlayer } from './pages/game-player';
 import { renderJoin } from './pages/join';
 import { renderLobbyHost } from './pages/lobby-host';
 import { renderLogin } from './pages/login';
-import { renderClosing } from './pages/closing';
+import { renderConfig } from './pages/config';
+import { renderHub } from './pages/hub';
+import { renderResults } from './pages/results';
 
 // ── Global ERROR toast ────────────────────────────────────────────────────────
 // Listens for unhandled ERROR WS events dispatched as a custom DOM event.
@@ -40,11 +42,13 @@ function requireHostAuth(): boolean {
 
 const routes: Record<string, (app: HTMLElement) => void> = {
   '#/login': renderLogin,
+  '#/host/hub': renderHub,
+  '#/host/config': renderConfig,
   '#/host/lobby': renderLobbyHost,
   '#/host/game': renderGameHost,
   '#/player/game': renderGamePlayer,
   '#/player/wait': renderGamePlayer,
-  '#/closing': renderClosing,
+  '#/results': renderResults,
 };
 
 function getCurrentRoute(): string {

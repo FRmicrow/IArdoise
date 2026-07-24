@@ -4,6 +4,8 @@
  * HTTP coverage:
  *   - POST /api/auth/login (happy path + invalid credentials)
  *   - POST /api/sessions (happy path, optional initialPhrase, duplicate session)
+ *   - POST /api/sessions persists custom settings and applies defaults (004, FR-004)
+ *   - POST /api/sessions rejects out-of-enum settings values with 400 (004)
  *   - GET /api/sessions/:sessionId/status (lobby / 404)
  *   - POST /api/sessions/:sessionId/players (happy path + registration lock)
  *
@@ -12,8 +14,15 @@
  *     player entries carry no score
  *   - START_GAME requires >=1 player and broadcasts GAME_STARTED to all clients
  *   - SET_PROMPT rejects blank/whitespace text and rejects when session is not active
- *   - END_GAME sets status to 'ended', broadcasts GAME_ENDED with no scoreboard,
- *     a subsequent SET_PROMPT is rejected, and joining after end returns 409
+ *   - END_GAME sets status to 'ended', broadcasts GAME_ENDED with ranked
+ *     results, a subsequent SET_PROMPT is rejected, and joining after end
+ *     returns 409
+ *   - NEXT_QUESTION is refused with INVALID_STATE once the last configured
+ *     round is reached; QUESTION_ADVANCED carries maxRounds (004, FR-009)
+ *   - MARK_DRAWING_DONE is player-only, sets/broadcasts finished status (004)
+ *   - AWARD_ROUND_POINTS is host-only, is never blocked by an unscored round,
+ *     and GAME_ENDED's results reflect exactly the awarded points; results
+ *     are empty when pointsEnabled is false (004, FR-011/FR-013)
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -53,6 +62,7 @@ async function buildTestApp(): Promise<FastifyInstance> {
   const { registerGameHandler } = await import('../../src/ws/handlers/gameHandler.js');
   const { registerHostPlayerHandler } = await import('../../src/ws/handlers/hostPlayerHandler.js');
   const { registerHeartbeatHandler } = await import('../../src/ws/handlers/heartbeatHandler.js');
+  const { registerScoringHandler } = await import('../../src/ws/handlers/scoringHandler.js');
 
   await fastify.register(loginRoute, { prefix: '/api/auth' });
   await fastify.register(sessionRoutes, { prefix: '/api/sessions' });
@@ -65,6 +75,7 @@ async function buildTestApp(): Promise<FastifyInstance> {
   registerGameHandler(wsRouter);
   registerHostPlayerHandler(wsRouter);
   registerHeartbeatHandler(wsRouter);
+  registerScoringHandler(wsRouter);
 
   fastify.get('/ws', { websocket: true }, (socket) => {
     const wsClientId = randomUUID();
@@ -212,6 +223,58 @@ describe('HTTP API integration', () => {
       const { SessionManager } = await import('../../src/session/SessionManager.js');
       const session = SessionManager.getInstance().getSession(body.sessionId);
       expect(session?.currentPhrase).toBe('Dessine un chat');
+    });
+
+    it('applies default settings when none are provided', async () => {
+      const token = await mintHostToken('http-default-settings-host');
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(res.statusCode).toBe(201);
+      const body = res.json<{ sessionId: string }>();
+
+      const { SessionManager } = await import('../../src/session/SessionManager.js');
+      const session = SessionManager.getInstance().getSession(body.sessionId);
+      expect(session?.settings).toEqual({
+        roundDurationSec: 60,
+        maxRounds: 3,
+        maxPlayers: 8,
+        pointsEnabled: true,
+      });
+    });
+
+    it('persists custom settings when provided', async () => {
+      const token = await mintHostToken('http-custom-settings-host');
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { Authorization: `Bearer ${token}` },
+        payload: { roundDurationSec: 30, maxRounds: 5, maxPlayers: 4, pointsEnabled: false },
+      });
+      expect(res.statusCode).toBe(201);
+      const body = res.json<{ sessionId: string }>();
+
+      const { SessionManager } = await import('../../src/session/SessionManager.js');
+      const session = SessionManager.getInstance().getSession(body.sessionId);
+      expect(session?.settings).toEqual({
+        roundDurationSec: 30,
+        maxRounds: 5,
+        maxPlayers: 4,
+        pointsEnabled: false,
+      });
+    });
+
+    it('returns 400 for an out-of-enum settings value', async () => {
+      const token = await mintHostToken('http-invalid-settings-host');
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { Authorization: `Bearer ${token}` },
+        payload: { maxRounds: 4 },
+      });
+      expect(res.statusCode).toBe(400);
     });
   });
 
@@ -429,7 +492,204 @@ describe('HTTP API integration', () => {
       playerWs.close();
     });
 
-    it('END_GAME sets status to ended, broadcasts GAME_ENDED with no scoreboard, and blocks further prompts/joins', async () => {
+    it('NEXT_QUESTION is refused once the last configured round is reached (004, FR-009)', async () => {
+      const token = await mintHostToken('ws-round-guard-host');
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { Authorization: `Bearer ${token}` },
+        payload: { maxRounds: 3 },
+      });
+      const { sessionId: sid } = createRes.json<{ sessionId: string }>();
+
+      const joinRes = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/players`,
+        payload: { name: 'Farid' },
+      });
+      const { playerId } = joinRes.json<{ playerId: string }>();
+
+      const hostWs = await connectWs(app);
+      send(hostWs, 'AUTH', { role: 'host', token, sessionId: sid });
+      await waitFor(hostWs, 'SESSION_STATE');
+
+      const playerWs = await connectWs(app);
+      send(playerWs, 'AUTH', { role: 'player', playerId, sessionId: sid });
+      await waitFor(playerWs, 'SESSION_STATE');
+
+      send(hostWs, 'START_GAME', { sessionId: sid });
+      await waitFor(hostWs, 'GAME_STARTED');
+
+      // round 1 -> 2
+      send(hostWs, 'NEXT_QUESTION', { sessionId: sid });
+      const advanced1 = await waitFor(hostWs, 'QUESTION_ADVANCED');
+      expect(advanced1.payload).toEqual({ roundIndex: 1, maxRounds: 3 });
+
+      // round 2 -> 3 (last configured round, index 2)
+      send(hostWs, 'NEXT_QUESTION', { sessionId: sid });
+      const advanced2 = await waitFor(hostWs, 'QUESTION_ADVANCED');
+      expect(advanced2.payload).toEqual({ roundIndex: 2, maxRounds: 3 });
+
+      // Attempting to advance past round 3/3 is refused
+      send(hostWs, 'NEXT_QUESTION', { sessionId: sid });
+      const refused = await waitFor(hostWs, 'ERROR');
+      expect(refused.payload['code']).toBe('INVALID_STATE');
+
+      const { SessionManager } = await import('../../src/session/SessionManager.js');
+      expect(SessionManager.getInstance().getSession(sid)?.roundIndex).toBe(2);
+
+      hostWs.close();
+      playerWs.close();
+    });
+
+    it('MARK_DRAWING_DONE is player-only and broadcasts PLAYER_FINISHED (004, FR-012)', async () => {
+      const token = await mintHostToken('ws-mark-done-host');
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const { sessionId: sid } = createRes.json<{ sessionId: string }>();
+
+      const joinRes = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/players`,
+        payload: { name: 'Gabin' },
+      });
+      const { playerId } = joinRes.json<{ playerId: string }>();
+
+      const hostWs = await connectWs(app);
+      send(hostWs, 'AUTH', { role: 'host', token, sessionId: sid });
+      await waitFor(hostWs, 'SESSION_STATE');
+
+      const playerWs = await connectWs(app);
+      send(playerWs, 'AUTH', { role: 'player', playerId, sessionId: sid });
+      await waitFor(playerWs, 'SESSION_STATE');
+
+      send(hostWs, 'START_GAME', { sessionId: sid });
+      await waitFor(hostWs, 'GAME_STARTED');
+
+      // Host attempting MARK_DRAWING_DONE is rejected — player-only action
+      send(hostWs, 'MARK_DRAWING_DONE', { sessionId: sid });
+      const unauthorized = await waitFor(hostWs, 'ERROR');
+      expect(unauthorized.payload['code']).toBe('UNAUTHORIZED');
+
+      const hostFinished = waitFor(hostWs, 'PLAYER_FINISHED');
+      send(playerWs, 'MARK_DRAWING_DONE', { sessionId: sid });
+      const finished = await hostFinished;
+      expect(finished.payload).toEqual({ playerId });
+
+      const { SessionManager } = await import('../../src/session/SessionManager.js');
+      const session = SessionManager.getInstance().getSession(sid);
+      expect(session?.players.get(playerId)?.finishedCurrentRound).toBe(true);
+
+      hostWs.close();
+      playerWs.close();
+    });
+
+    it('AWARD_ROUND_POINTS is host-only, never blocks on an unscored round, and GAME_ENDED reflects awarded points (004, FR-011/FR-013)', async () => {
+      const token = await mintHostToken('ws-award-points-host');
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { Authorization: `Bearer ${token}` },
+        payload: { maxRounds: 3 },
+      });
+      const { sessionId: sid } = createRes.json<{ sessionId: string }>();
+
+      const alice = (
+        await app.inject({ method: 'POST', url: `/api/sessions/${sid}/players`, payload: { name: 'Alice' } })
+      ).json<{ playerId: string }>();
+      const bob = (
+        await app.inject({ method: 'POST', url: `/api/sessions/${sid}/players`, payload: { name: 'Bob' } })
+      ).json<{ playerId: string }>();
+
+      const hostWs = await connectWs(app);
+      send(hostWs, 'AUTH', { role: 'host', token, sessionId: sid });
+      await waitFor(hostWs, 'SESSION_STATE');
+      const playerWs = await connectWs(app);
+      send(playerWs, 'AUTH', { role: 'player', playerId: alice.playerId, sessionId: sid });
+      await waitFor(playerWs, 'SESSION_STATE');
+
+      send(hostWs, 'START_GAME', { sessionId: sid });
+      await waitFor(hostWs, 'GAME_STARTED');
+
+      // Player attempting AWARD_ROUND_POINTS is rejected — host-only action
+      send(playerWs, 'AWARD_ROUND_POINTS', { sessionId: sid, roundIndex: 0, points: { [alice.playerId]: 5 } });
+      const unauthorized = await waitFor(playerWs, 'ERROR');
+      expect(unauthorized.payload['code']).toBe('UNAUTHORIZED');
+
+      // Round 0 scored
+      send(hostWs, 'AWARD_ROUND_POINTS', {
+        sessionId: sid,
+        roundIndex: 0,
+        points: { [alice.playerId]: 5, [bob.playerId]: 2 },
+      });
+      await waitFor(hostWs, 'SCORES_UPDATED');
+
+      // Advance twice WITHOUT scoring round 1 — must never be blocked (FR-011 non-blocking)
+      send(hostWs, 'NEXT_QUESTION', { sessionId: sid });
+      await waitFor(hostWs, 'QUESTION_ADVANCED');
+      send(hostWs, 'NEXT_QUESTION', { sessionId: sid });
+      await waitFor(hostWs, 'QUESTION_ADVANCED');
+
+      // Round 2 scored
+      send(hostWs, 'AWARD_ROUND_POINTS', {
+        sessionId: sid,
+        roundIndex: 2,
+        points: { [alice.playerId]: 1, [bob.playerId]: 9 },
+      });
+      await waitFor(hostWs, 'SCORES_UPDATED');
+
+      const hostEndedPromise = waitFor(hostWs, 'GAME_ENDED');
+      send(hostWs, 'END_GAME', { sessionId: sid });
+      const ended = await hostEndedPromise;
+
+      expect(ended.payload['pointsEnabled']).toBe(true);
+      const results = ended.payload['results'] as Array<{ playerId: string; totalPoints: number; rank: number }>;
+      // Alice: 5 (round 0) + 0 (unscored round 1) + 1 (round 2) = 6
+      // Bob:   2 (round 0) + 0 (unscored round 1) + 9 (round 2) = 11
+      expect(results.find((r) => r.playerId === bob.playerId)).toMatchObject({ totalPoints: 11, rank: 1 });
+      expect(results.find((r) => r.playerId === alice.playerId)).toMatchObject({ totalPoints: 6, rank: 2 });
+
+      hostWs.close();
+      playerWs.close();
+    });
+
+    it('GAME_ENDED omits point totals when pointsEnabled is false (004, FR-013)', async () => {
+      const token = await mintHostToken('ws-no-points-host');
+      const createRes = await app.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: { Authorization: `Bearer ${token}` },
+        payload: { pointsEnabled: false },
+      });
+      const { sessionId: sid } = createRes.json<{ sessionId: string }>();
+
+      const joinRes = await app.inject({
+        method: 'POST',
+        url: `/api/sessions/${sid}/players`,
+        payload: { name: 'Hana' },
+      });
+      const hostWs = await connectWs(app);
+      send(hostWs, 'AUTH', { role: 'host', token, sessionId: sid });
+      await waitFor(hostWs, 'SESSION_STATE');
+      void joinRes;
+
+      send(hostWs, 'START_GAME', { sessionId: sid });
+      await waitFor(hostWs, 'GAME_STARTED');
+
+      const hostEndedPromise = waitFor(hostWs, 'GAME_ENDED');
+      send(hostWs, 'END_GAME', { sessionId: sid });
+      const ended = await hostEndedPromise;
+
+      expect(ended.payload['pointsEnabled']).toBe(false);
+      expect(ended.payload['results']).toEqual([]);
+
+      hostWs.close();
+    });
+
+    it('END_GAME sets status to ended, broadcasts GAME_ENDED with ranked results, and blocks further prompts/joins', async () => {
       const token = await mintHostToken('ws-end-game-host');
       const createRes = await app.inject({
         method: 'POST',
@@ -463,9 +723,11 @@ describe('HTTP API integration', () => {
       const playerEndedPromise = waitFor(playerWs, 'GAME_ENDED');
       send(hostWs, 'END_GAME', { sessionId: sid });
       const [hostEnded, playerEnded] = await Promise.all([hostEndedPromise, playerEndedPromise]);
-      expect(hostEnded.payload).toEqual({});
-      expect(playerEnded.payload).toEqual({});
-      expect(hostEnded.payload).not.toHaveProperty('scoreboard');
+      expect(hostEnded.payload).toEqual({
+        pointsEnabled: true,
+        results: [{ playerId, name: 'Eve', totalPoints: 0, rank: 1 }],
+      });
+      expect(playerEnded.payload).toEqual(hostEnded.payload);
 
       const { SessionManager } = await import('../../src/session/SessionManager.js');
       expect(SessionManager.getInstance().getSession(sid)?.status).toBe('ended');
